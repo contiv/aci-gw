@@ -31,8 +31,6 @@ from flask import Flask
 from flask import json, request, Response
 
 contivDefTenant = 'ContivTenant'
-# Physical domain created for contiv cluster
-contivClusterDom = 'uni/phys-allvlans'
 # Node used by contiv
 contivDefNode = 'topology/pod-1/node-102'
 
@@ -126,6 +124,12 @@ def createEpg(moDir):
     # associate to BD
     RsBd(fvEpg, tnFvBDName=bdName)
     # associate to phy domain
+    physDom = os.getenv('APIC_PHYS_DOMAIN', 'None')
+    if physDom is 'None':
+        print "Pls specify a physical domain"
+        sys.exit(2)    
+
+    contivClusterDom = 'uni/phys-' + physDom
     RsDomAtt(fvEpg, contivClusterDom)
     # TODO: add static binding
     cR = ConfigRequest()
@@ -398,6 +402,10 @@ def setupApp(spec, apicMoDir):
         # associate to BD
         RsBd(fvEpg, tnFvBDName=bdName)
         # associate to phy domain
+        physDom = os.getenv('APIC_PHYS_DOMAIN', 'None')
+        if physDom is 'None':
+            return ['failed', 'Physical domain not specified']
+        contivClusterDom = 'uni/phys-' + physDom
         RsDomAtt(fvEpg, contivClusterDom)
         # TODO: add static binding
         vlan = epg['vlantag']
