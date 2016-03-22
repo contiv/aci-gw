@@ -124,8 +124,8 @@ def createEpg(moDir):
     # associate to BD
     RsBd(fvEpg, tnFvBDName=bdName)
     # associate to phy domain
-    physDom = os.getenv('APIC_PHYS_DOMAIN', 'None')
-    if physDom is 'None':
+    physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
+    if physDom == "not_specified":
         print "Pls specify a physical domain"
         sys.exit(2)    
 
@@ -256,6 +256,13 @@ def setupTenant(spec, apicMoDir):
 
 # create a bd and subnet if it does not exist
 def setupSubnet(spec, apicMoDir):
+    # Check if we are going to be using the provided bridge domain.
+    # In that case, we don't need to create a subnet/BD.
+    bridgeDomain = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
+    if bridgeDomain != "not_specified":
+	# Use what has been provided.
+        return ['success', 'ok']
+         
     gw = spec['subnet']
     if subnetDict[gw] is None:
         print "Creating subnet ", gw
@@ -343,6 +350,24 @@ def addProvidedContracts(spec, apicMoDir):
     appKey = tenant + '-' + appName
     appResourceDict[appKey] = resrcList
 
+def setupUnenforcedMode(spec, apicMoDir):
+    epgList = spec['epgs']
+    tenant = spec['tenant']
+    appName = spec['app']
+
+    for e in epgList:
+        epg = SafeDict(e)
+        epgName = epg['name']
+        epgDn = 'uni/tn-' + tenant + '/ap-' + appName + '/epg-' + epgName
+        epgMo = apicMoDir.lookupByDn(epgDn)
+
+        epgcR = ConfigRequest()
+        contrDn = 'uni/tn-common/brc-default'
+        contrMo = apicMoDir.lookupByDn(contrDn)
+        consMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
+        epgcR.addMo(epgMo)
+        apicMoDir.commit(epgcR)
+
 def setupConsumers(spec, apicMoDir):
 
     tenant = spec['tenant']
@@ -371,6 +396,20 @@ def setupConsumers(spec, apicMoDir):
         epgcR.addMo(epgMo)
         apicMoDir.commit(epgcR)
 
+def getBridgeDomainName(spec):
+    bridgeDomain = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
+    if bridgeDomain != "not_specified":
+	# Use what has been provided.
+        return bridgeDomain
+
+    tenant = spec['tenant']
+    gateway = spec['subnet']
+    netmask = gateway.split('/')
+    bridgeDomain = tenant + '-' + netmask[0]
+
+    return bridgeDomain
+
+
 # create EPGs and contracts per the app spec
 def setupApp(spec, apicMoDir):
     # create an app prof if it does not exist.
@@ -378,6 +417,10 @@ def setupApp(spec, apicMoDir):
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
     epgList = spec['epgs']
+
+    physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
+    if physDom == "not_specified":
+        return ['failed', 'Physical domain not specified']
 
     fvApMo = appDict[appName]
     if fvApMo is None:
@@ -387,24 +430,20 @@ def setupApp(spec, apicMoDir):
     cR = ConfigRequest()
     cR.addMo(fvApMo)
 
-    # create EPGs
-    gw = spec['subnet']
-    netmask = gw.split('/')
-    bdName = tenant + '-' + netmask[0]
+    # Get the bridge domain
+    bdName = getBridgeDomainName(spec)
 
     #if nodeid is passed, use that
     leafNodes = os.getenv('APIC_LEAF_NODE', contivDefNode)
     leafList = leafNodes.split(",")
 
+    # Walk the EPG list and create them.
     for epg in epgList:
         epgName = epg['name']
         fvEpg = AEPg(fvApMo, epgName)
         # associate to BD
         RsBd(fvEpg, tnFvBDName=bdName)
         # associate to phy domain
-        physDom = os.getenv('APIC_PHYS_DOMAIN', 'None')
-        if physDom is 'None':
-            return ['failed', 'Physical domain not specified']
         contivClusterDom = 'uni/phys-' + physDom
         RsDomAtt(fvEpg, contivClusterDom)
         # TODO: add static binding
@@ -414,8 +453,16 @@ def setupApp(spec, apicMoDir):
             RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
         
     apicMoDir.commit(cR)
-    addProvidedContracts(spec, apicMoDir)
-    setupConsumers(spec, apicMoDir)
+
+    unenforcedMode = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'no')
+    if unenforcedMode.lower() == "yes":
+        print "Setting up EPG in un-enforced mode."
+        setupUnenforcedMode(spec, apicMoDir)
+    else:
+        print "Establishing provided contracts."
+        addProvidedContracts(spec, apicMoDir)
+        setupConsumers(spec, apicMoDir)
+
     return ['success', 'ok']
 
 # delete App profile and any contracts/filter allocated for it
