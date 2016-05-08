@@ -287,6 +287,16 @@ def setupSubnet(spec, apicMoDir):
 
     return ['success', 'ok']
 
+def ipProtoNametoNumber(protoString):
+    if protoString == 'icmp':
+        return 1
+    elif protoString == 'tcp':
+        return 6
+    elif protoString == 'udp':
+        return 17
+    else:
+        return -1
+
 def addProvidedContracts(spec, apicMoDir):
 
     tenant = spec['tenant']
@@ -301,12 +311,12 @@ def addProvidedContracts(spec, apicMoDir):
     for e in epgList:
         epg = SafeDict(e)
         serviceName = epg['name']
-        servicePort = epg['servport']
-        if servicePort is 'missing':
+        filters = epg['filterinfo']
+        if filters is 'missing':
             print "No provider in ", serviceName
             continue
 
-        print ">>Provider ", servicePort, serviceName
+        print ">>Provider ", filters, serviceName
         epgcR = ConfigRequest()
         # filter container
         filterName = 'filt-' + appName + serviceName
@@ -314,16 +324,36 @@ def addProvidedContracts(spec, apicMoDir):
         # save the filter dn to this app's resource list
         resrcList.append(filterMo) 
     
-	for dPort in servicePort:
-            # filter entries for the specified ports
-            print "...entry for port", dPort
-            entryName = 'entryPort-' + dPort
+	for eachEntry in filters:
+	    filterEntry = SafeDict(eachEntry)
+            ipProtocol = filterEntry['protocol']
+            servPort = filterEntry['servport']
+	   
+            etherType = 'ip'
+            filterProto = 0
+            filterPort = 0
+            if ipProtocol is not 'missing':
+                filterProto = ipProtoNametoNumber(ipProtocol)
+	    if servPort is not 'missing':
+                filterPort = int(servPort)
+
+            # Form the entry name
+            entryName = 'entry-' + etherType
+            if filterProto > 0:
+                entryName = entryName + '-' + ipProtocol
+            if filterPort > 0:
+                entryName = entryName + '-' + servPort          
+
+            print "creating filter entry %s", entryName
             entryMo = Entry(filterMo, entryName)
-            entryMo.prot = 6  # tcp
-            entryMo.etherT = 'ip'
-            if dPort != 0:
-                entryMo.dFromPort = int(dPort)
-                entryMo.dToPort = int(dPort)
+            entryMo.etherT = etherType
+            if filterProto > 0:
+                entryMo.prot = filterProto
+            # Set port information only if TCP or UDP
+            if entryMo.prot == 6 or entryMo.prot == 17:
+                if filterPort > 0:
+                    entryMo.dFromPort = filterPort
+                    entryMo.dToPort = filterPort
     
         # contract container
         ccName = 'contr-' + appName + serviceName
@@ -633,7 +663,7 @@ def validateData(jsData):
             return ['failed', 'epg must have a vlantag']
 
         # build set of provided services
-        if not epg['servport'] is 'missing':
+        if not epg['filterinfo'] is 'missing':
             provideSet.add(epg['name'])
 
         if epg['uses'] is 'missing':
