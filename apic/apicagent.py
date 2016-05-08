@@ -311,12 +311,12 @@ def addProvidedContracts(spec, apicMoDir):
     for e in epgList:
         epg = SafeDict(e)
         serviceName = epg['name']
-        protocolPorts = epg['protoports']
-        if protocolPorts is 'missing':
+        filters = epg['filterinfo']
+        if filters is 'missing':
             print "No provider in ", serviceName
             continue
 
-        print ">>Provider ", protocolPorts, serviceName
+        print ">>Provider ", filters, serviceName
         epgcR = ConfigRequest()
         # filter container
         filterName = 'filt-' + appName + serviceName
@@ -324,10 +324,10 @@ def addProvidedContracts(spec, apicMoDir):
         # save the filter dn to this app's resource list
         resrcList.append(filterMo) 
     
-	for eachEntry in protocolPorts:
-	    protoPortSet = SafeDict(eachEntry)
-            ipProtocol = protoPortSet['protocol']
-            servPort = protoPortSet['servport']
+	for eachEntry in filters:
+	    filterEntry = SafeDict(eachEntry)
+            ipProtocol = filterEntry['protocol']
+            servPort = filterEntry['servport']
 	   
             etherType = 'ip'
             filterProto = 0
@@ -663,7 +663,7 @@ def validateData(jsData):
             return ['failed', 'epg must have a vlantag']
 
         # build set of provided services
-        if not epg['protoports'] is 'missing':
+        if not epg['filterinfo'] is 'missing':
             provideSet.add(epg['name'])
 
         if epg['uses'] is 'missing':
