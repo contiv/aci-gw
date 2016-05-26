@@ -15,6 +15,7 @@ import os
 import sys
 from cobra.mit.access import MoDirectory
 from cobra.mit.session import LoginSession
+from cobra.mit.session import CertSession
 from cobra.mit.request import ConfigRequest
 from cobra.model.fv import Tenant
 from cobra.model.fv import Ctx
@@ -30,6 +31,7 @@ from cobra.model.vz import Filter, Entry, BrCP, Subj, RsSubjFiltAtt
 from flask import Flask
 from flask import json, request, Response
 
+DefACIKeyFile = "/aciconfig/aci.key"
 contivDefTenant = 'ContivTenant'
 # Node used by contiv
 contivDefNode = 'topology/pod-1/node-102'
@@ -544,6 +546,7 @@ def getResp(result, info):
     resp = Response(js, status=200, mimetype='application/json')
     return resp
 
+################################################################################
 @app.route("/deleteAppProf", methods=['POST'])
 def delete_api():
     if request.headers['Content-Type'] != 'application/json':
@@ -565,21 +568,22 @@ def delete_api():
         return resp
 
     apicUrl = os.environ.get('APIC_URL') 
-    if apicUrl is 'None':
-        resp = getResp('failed', 'APIC_URL not set')
+    if apicUrl == 'SANITY':
+        resp = getResp("success", "LGTM")
         return resp
 
-    username = os.getenv('APIC_USERNAME', 'admin')
-    password = os.getenv('APIC_PASSWORD', 'ins3965!')
+    apicMoDir = apicSession.getMoDir()
+    if apicMoDir is None:
+        resp = getResp('failed', "Invalid APIC session")
+        return resp
 
-    loginSession = LoginSession(apicUrl, username, password)
-    apicMoDir = MoDirectory(loginSession)
     apicMoDir.login()
     ret = deleteApp(jsData, apicMoDir)
     apicMoDir.logout()
     resp = getResp(ret[0], ret[1])
     return resp
 
+################################################################################
 @app.route("/createAppProf", methods=['POST'])
 def create_api():
     if request.headers['Content-Type'] != 'application/json':
@@ -594,20 +598,15 @@ def create_api():
         resp = getResp('invalid-args', valid[1])
         return resp
 
-    apicUrl = os.getenv('APIC_URL', 'None') 
-    if apicUrl == 'None':
-        resp = getResp('failed', 'APIC_URL not set')
-        return resp
-
     if apicUrl == 'SANITY':
         resp = getResp(valid[0], valid[1])
         return resp
 
-    username = os.getenv('APIC_USERNAME', 'admin')
-    password = os.getenv('APIC_PASSWORD', 'ins3965!')
+    apicMoDir = apicSession.getMoDir()
+    if apicMoDir is None:
+        resp = getResp('failed', "Invalid APIC session")
+        return resp
 
-    loginSession = LoginSession(apicUrl, username, password)
-    apicMoDir = MoDirectory(loginSession)
     apicMoDir.login()
     setupTenant(jsData, apicMoDir)
     ret = setupSubnet(jsData, apicMoDir)
@@ -621,6 +620,7 @@ def create_api():
     resp = getResp(ret[0], ret[1])
     return resp
 
+################################################################################
 def validateData(jsData):
     topData = SafeDict(jsData)
     # make sure we have tenant, subnet and app at top level
@@ -682,10 +682,12 @@ def validateData(jsData):
             for item in diff:
                 s1 += item
                 s1 += ', '
+            print s1
             return ['failed', s1]
 
     return ['success', 'LGTM']
 
+################################################################################
 @app.route("/validateAppProf", methods=['POST'])
 def validate_api():
     if request.headers['Content-Type'] != 'application/json':
@@ -699,6 +701,86 @@ def validate_api():
     resp = getResp(ret[0], ret[1])
     return resp
 
+################################################################################
+def readFile(fileName=None, mode="r"):
+    if fileName is None:
+        return ""
+
+    fileData = ""
+    try:
+      aFile = open(fileName, mode)
+      fileData = aFile.read()
+    except:
+      print "Could not read {}".format(fileName)
+
+    return fileData
+
+################################################################################
+def VerifyEnv():
+    mandatoryEnvVars = ['APIC_URL',
+                        'APIC_USERNAME',
+                        'APIC_LEAF_NODE',
+                        'APIC_PHYS_DOMAIN']
+
+    for envVar in mandatoryEnvVars:
+        val = os.getenv(envVar, 'None')
+        if val == 'None':
+            print "WARNING: {} is not set - GW cannot function".format(envVar)
+
+################################################################################
+class ApicSession():
+    def __init__(self):
+        self.sessionType = "INVALID"
+        self.apicUrl = os.getenv('APIC_URL', 'None')
+        self.apicUser = os.getenv('APIC_USERNAME', 'None')
+        if self.apicUrl == 'None' or self.apicUser == 'None':
+            print "Cannot set up session -- missing config"
+            return
+
+        self.certDN = os.getenv('APIC_CERT_DN', 'None') 
+        self.pKey = ""
+        aciKeyFile = os.getenv('APIC_LOCAL_KEY_FILE', DefACIKeyFile) 
+        if self.certDN != 'None':
+            self.pKey = readFile(aciKeyFile)
+        else:
+            print "APIC_CERT_DN is not set, keys disabled"
+
+        if self.pKey != "":
+            self.sessionType = "KEY"
+            print "Key based auth selected"
+            return
+
+        self.apicPassword = os.getenv('APIC_PASSWORD', 'None')
+        if self.apicPassword == 'None':
+            print "ERROR: No valid auth type available"
+        else:
+            print "Login based auth selected"
+            self.sessionType = "PASSWORD"
+
+    def getMoDir(self):
+        if self.sessionType == "KEY":
+            certSession = CertSession(self.apicUrl, self.certDN, self.pKey)
+            return MoDirectory(certSession)
+
+        if self.sessionType == "PASSWORD":
+            loginSession = LoginSession(self.apicUrl, self.apicUser,
+                                        self.apicPassword)
+            return MoDirectory(loginSession)
+
+        if self.sessionType == "INVALID":
+            return None
+
+    def getSessionType(self):
+        return self.sessionType
+
+################################################################################
 if __name__ == "__main__":
+
+    # Verify basic environment settings we expect
+    VerifyEnv()
+
+    # Setup auth type for apic sessions
+    apicSession = ApicSession()
+        
     app.run(host='0.0.0.0', debug=True)
 
