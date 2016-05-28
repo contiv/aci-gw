@@ -2,7 +2,7 @@
 
 Receives REST requests from netmaster and performs the corresponding apic configuration. Uses the aci cobra package for interactions with apic.
 
-##Building the aci-gw container:##
+##Building the aci-gw container##
 
 The SDK needs to be downloaded from an APIC. It is not yet available from a Cisco download site.
 The following information should be provided as arguments to the docker build.
@@ -44,7 +44,7 @@ Contiv currently uses vlans starting from 100. Please make sure that a block of 
     7. Make a note of the full node name of the ToRs you have connected to your servers.
 ```
 
-##Starting the aci-gw container:##
+##Starting the aci-gw container##
 
 The aci-gw container needs to be accessible by netmaster at localhost:5000. In order to ensure that, the aci-gw can be started on the same node as the netmaster, with --net=host option.
 
