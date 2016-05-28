@@ -19,11 +19,6 @@ docker build --build-arg APIC_URL=172.31.152.18 --build-arg APIC_PKG_VERSION=1.1
 
 ### Pre-requisites for ACI setup
 
-#### VLANS
-
-Contiv currently uses vlans starting from 100. Please make sure that a block of vlans starting from 100 are
- reserved for use by Contiv. This will be made configurable in a subsequent release.
-
 #### APIC Configuration (Fabric/Access Policies)
 
 ```
