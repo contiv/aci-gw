@@ -238,10 +238,50 @@ appResourceDict = SafeDict()
 app = Flask(__name__)
 apicUrl = 'notset'
 
+# create a DN string for tenant
+def formTenantDn(tenantName):
+    tenantDn = 'uni/tn-' + tenantName
+    return tenantDn
+
+# form a name for a tenant VRF
+def formTenantVRFName(tenantName):
+    tenVrfName = tenantName + '-Vrf'
+    return tenVrfName
+
+# create a DN string for the bridge domain
+def formBDDn(tenantName, bdName):
+    bdDn = 'uni/tn-' + tenantName + '/BD-' + bdName
+    return bdDn
+
+# form a name for the bridge domain
+def formBDName(tenantName, subnet):
+    bdName = tenantName + '-' + subnet
+    return bdName
+
+# create a DN string for the application profile
+def formAppProfDn(tenantName, appProfName):
+    appProfDn = 'uni/tn-' + tenantName + '/ap-' + appProfName
+    return appProfDn
+
+# Wrapper to check if an DN already exists
+def checkDnExists(apicMoDir, dnStr):
+    mo = apicMoDir.lookupByDn(dnStr)
+    if mo is None:
+        return (False, None)
+    else:
+        return (True, mo)
+    
 # create a tenant if it does not exist.
 def setupTenant(spec, apicMoDir):
     tenant = spec['tenant']
-    if tenantDict[tenant] is None:
+    # Check if the APIC already knows about this tenant
+    tenantDn = formTenantDn(tenant)
+    exists, fvTenantMo = checkDnExists(apicMoDir, tenantDn)
+    if exists:
+        # The tenant already exists in the APIC. Stash what we got.
+        print "Tenant %s already exists." % (tenant)
+        tenantDict[tenant] = fvTenantMo
+    else:
         print "Creating tenant ", tenant
         uniMo = apicMoDir.lookupByDn('uni')
         fvTenantMo = Tenant(uniMo, tenant)
@@ -260,23 +300,29 @@ def setupSubnet(spec, apicMoDir):
     # In that case, we don't need to create a subnet/BD.
     bridgeDomain = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
     if bridgeDomain != "not_specified":
-	# Use what has been provided.
+	    # Use what has been provided.
         return ['success', 'ok']
          
     gw = spec['subnet']
-    if subnetDict[gw] is None:
-        print "Creating subnet ", gw
 
-        netmask = gw.split('/')
-        if len(netmask) != 2:
-            return ['failed', 'invalid subnet']
+    netmask = gw.split('/')
+    if len(netmask) != 2:
+    	return ['failed', 'invalid subnet']
     
-        tenant = spec['tenant']
-        bdName = tenant + '-' + netmask[0]
+    tenant = spec['tenant']
+    bdName = formBDName(tenant, netmask[0])
+    bdDn = formBDDn(tenant, bdName)
+    # Check if this BD already exists within this tenant context.
+    exists, fvBDMo = checkDnExists(apicMoDir, bdDn)
+    if exists:
+        print "BD %s exists under tenant %s" % (bdName, tenant)
+        subnetDict[gw] = fvBDMo
+    else:
+        print "Creating BD %s under tenant %s" % (bdName, tenant)
         tenMo = tenantDict[tenant]
         fvBDMo = BD(tenMo, name=bdName)
         # associate to nw context
-        tenVrf = tenant + '-Vrf'
+        tenVrf = formTenantVRFName(tenant)
         RsCtx(fvBDMo, tnFvCtxName=tenVrf)
         # create subnet
         Subnet(fvBDMo, gw)
@@ -398,6 +444,50 @@ def setupUnenforcedMode(spec, apicMoDir):
         epgcR.addMo(epgMo)
         apicMoDir.commit(epgcR)
 
+def setupPerEpgProvConsContracts(spec, apicMoDir):
+    epgList = spec['epgs']
+    tenant = spec['tenant']
+    appName = spec['app']
+
+    for e in epgList:
+        epg = SafeDict(e)
+        epgName = epg['name']
+        if epg['conscontracts'] is 'missing' and epg['provcontracts'] is 'missing':
+            print "No external contracts/policies for this EPG %s" % (epgName)
+            continue
+
+        print "Setting up external contracts for %s" % (epgName)
+        epgDn = 'uni/tn-' + tenant + '/ap-' + appName + '/epg-' + epgName
+        epgMo = apicMoDir.lookupByDn(epgDn)
+		
+        # If the EPG mo does not exist, nothing can be
+        # done. Typically, should not happen.
+        if epgMo is None:
+            continue
+			
+        epgcR = ConfigRequest()
+
+        if epg['conscontracts'] is not 'missing':
+            for oneContractDn in epg['conscontracts']:
+                contrMo = apicMoDir.lookupByDn(oneContractDn)
+                if contrMo is None:
+                    # The specified contract is not present.
+                    # Move on with the next contract.
+                    continue                        
+                consMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
+
+        if epg['provcontracts'] is not 'missing':
+            for oneContractDn in epg['provcontracts']:
+                contrMo = apicMoDir.lookupByDn(oneContractDn)
+                if contrMo is None:
+                    # The specified contract is not present.
+                    # Move on with the next contract.
+                    continue                        
+                consMo = RsProv(epgMo, tnVzBrCPName=contrMo.name)
+
+        epgcR.addMo(epgMo)
+        apicMoDir.commit(epgcR)
+
 def setupConsumers(spec, apicMoDir):
 
     tenant = spec['tenant']
@@ -452,8 +542,16 @@ def setupApp(spec, apicMoDir):
     if physDom == "not_specified":
         return ['failed', 'Physical domain not specified']
 
-    fvApMo = appDict[appName]
-    if fvApMo is None:
+    # Check if the APIC already knows about this application profile
+    # within this tenant context
+    appProfDn = formAppProfDn(tenant, appName)
+    exists, fvApMo = checkDnExists(apicMoDir, appProfDn)
+    if exists:
+        # The appProfile already exists in the APIC. Stash what we got.
+        print "App-prof %s,%s already exists." % (tenant, appName)
+        appDict[appName] = fvApMo
+    else:
+        print "Creating application profile %s in tenant %s" % (appName, tenant)
         fvApMo = Ap(tenMo, appName)
         appDict[appName] = fvApMo
 
@@ -491,7 +589,10 @@ def setupApp(spec, apicMoDir):
     else:
         print "Establishing provided contracts."
         addProvidedContracts(spec, apicMoDir)
+        print "Establishing consumed contracts."
         setupConsumers(spec, apicMoDir)
+        print "Establishing pre-defined contracts."
+        setupPerEpgProvConsContracts(spec, apicMoDir)
 
     return ['success', 'ok']
 
@@ -552,6 +653,7 @@ def delete_api():
  
     print request
     jsData = request.get_json()
+    print jsData
     # make sure input is well-formed
     topData = SafeDict(jsData)
     if topData['tenant'] is 'missing':
@@ -588,6 +690,7 @@ def create_api():
  
     print request
     jsData = request.get_json()
+    print jsData
     # make sure input is well-formed
     valid = validateData(jsData)
     if not valid[0] is 'success':
