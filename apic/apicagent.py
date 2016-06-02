@@ -465,6 +465,7 @@ def setupPerEpgProvConsContracts(spec, apicMoDir):
         # If the EPG mo does not exist, nothing can be
         # done. Typically, should not happen.
         if epgMo is None:
+            print "Could not locate epg %s within tenant %s" % (epgName, tenant)
             continue
 			
         epgcR = ConfigRequest()
@@ -686,6 +687,35 @@ def delete_api():
     return resp
 
 ################################################################################
+def validatePredefContracts(jsData, apicMoDir):
+    topData = SafeDict(jsData)
+
+    epgList = jsData['epgs']
+
+    for e in epgList:
+        epg = SafeDict(e)
+        epgName = epg['name']
+        if epg['conscontracts'] is 'missing' and epg['provcontracts'] is 'missing':
+            # No external contracts to validate.
+            continue
+
+        if epg['conscontracts'] is not 'missing':
+            for oneContractDn in epg['conscontracts']:
+                contrMo = apicMoDir.lookupByDn(oneContractDn)
+                if contrMo is None:
+                    # Contract not found. Bail.
+                    return ['failed', "External contract(s) not found."]
+
+        if epg['provcontracts'] is not 'missing':
+            for oneContractDn in epg['provcontracts']:
+                contrMo = apicMoDir.lookupByDn(oneContractDn)
+                if contrMo is None:
+                    # Contract not found. Bail.
+                    return ['failed', "External contract(s) not found."]
+
+    return ['success', 'LGTM']
+
+    
 @app.route("/createAppProf", methods=['POST'])
 def create_api():
     if request.headers['Content-Type'] != 'application/json':
@@ -711,6 +741,12 @@ def create_api():
         return resp
 
     apicMoDir.login()
+
+    valid = validatePredefContracts(jsData, apicMoDir)
+    if not valid[0] is 'success':
+        resp = getResp('invalid-args', valid[1])
+        return resp
+
     setupTenant(jsData, apicMoDir)
     ret = setupSubnet(jsData, apicMoDir)
     if ret[0] != 'success':
@@ -724,6 +760,7 @@ def create_api():
     return resp
 
 ################################################################################
+
 def validateData(jsData):
     topData = SafeDict(jsData)
     # make sure we have tenant, subnet and app at top level
