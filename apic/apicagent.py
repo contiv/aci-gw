@@ -692,11 +692,13 @@ def validatePredefContracts(jsData, apicMoDir):
 
     epgList = jsData['epgs']
 
+    print "Validating pre-defined contracts"
     for e in epgList:
         epg = SafeDict(e)
         epgName = epg['name']
         if epg['conscontracts'] is 'missing' and epg['provcontracts'] is 'missing':
             # No external contracts to validate.
+            print "nothing to validate"
             continue
 
         if epg['conscontracts'] is not 'missing':
@@ -704,6 +706,7 @@ def validatePredefContracts(jsData, apicMoDir):
                 contrMo = apicMoDir.lookupByDn(oneContractDn)
                 if contrMo is None:
                     # Contract not found. Bail.
+                    print "Contract %s not found" % (oneContractDn)
                     return ['failed', "External contract(s) not found."]
 
         if epg['provcontracts'] is not 'missing':
@@ -711,6 +714,7 @@ def validatePredefContracts(jsData, apicMoDir):
                 contrMo = apicMoDir.lookupByDn(oneContractDn)
                 if contrMo is None:
                     # Contract not found. Bail.
+                    print "Contract %s not found" % (oneContractDn)
                     return ['failed', "External contract(s) not found."]
 
     return ['success', 'LGTM']
