@@ -26,7 +26,7 @@ from cobra.model.fv import Ap
 from cobra.model.fv import AEPg
 from cobra.model.fv import RsBd
 from cobra.model.fv import RsDomAtt, RsNodeAtt
-from cobra.model.fv import RsProv, RsCons
+from cobra.model.fv import RsProv, RsCons, CEp
 from cobra.model.vz import Filter, Entry, BrCP, Subj, RsSubjFiltAtt
 from flask import Flask
 from flask import json, request, Response
@@ -648,6 +648,19 @@ def getResp(result, info):
     resp = Response(js, status=200, mimetype='application/json')
     return resp
 
+#response for GET request
+def getEPResp(result, msg="ok", ip="None", vlan="None"):
+    data = {
+         'result' : result,
+         'ip'   : ip,
+         'vlan'   : vlan,
+         'msg'   : msg
+    }
+    js = json.dumps(data)
+    
+    resp = Response(js, status=200, mimetype='application/json')
+    return resp
+
 ################################################################################
 @app.route("/deleteAppProf", methods=['POST'])
 def delete_api():
@@ -843,6 +856,74 @@ def validate_api():
     print jsData
     ret = validateData(jsData)
     resp = getResp(ret[0], ret[1])
+    return resp
+
+################################################################################
+@app.route("/getEndpoint", methods=['POST'])
+def endpoint_api():
+    if request.headers['Content-Type'] != 'application/json':
+        resp = getEPResp('error', 'invalid-args')
+        return resp
+
+    print request
+    jsData = request.get_json()
+    print jsData
+    # make sure input is well-formed
+    topData = SafeDict(jsData)
+    if topData['tenant'] is 'missing':
+        print "tenant name is missing"
+        resp = getEPResp('error', 'tenant name missing')
+        print resp
+        return resp
+
+    if topData['app'] is 'missing':
+        print "app name is missing"
+        resp = getEPResp('error', 'app name missing')
+        print resp
+        return resp
+
+    if topData['epg'] is 'missing':
+        print "epg name is missing"
+        resp = getEPResp('error', 'epg name missing')
+        print resp
+        return resp
+
+    if topData['epmac'] is 'missing':
+        print "ep mac is missing"
+        resp = getEPResp('error', 'ep mac missing')
+        print resp
+        return resp
+
+    apicMoDir = apicSession.getMoDir()
+    if apicMoDir is None:
+        resp = getEPResp('failed', "Invalid APIC session")
+        print resp
+        return resp
+
+    apicMoDir.login()
+    epDN = "uni/tn-" + topData['tenant'] + "/ap-" + topData['app'] + \
+           "/epg-" + topData['epg'] + "/cep-" + topData['epmac']
+    epMo = apicMoDir.lookupByDn(epDN)
+    if epMo is None:
+        print "ERR {} not found".format(epDN)
+        result = "None"
+        ip = "None"
+        vlan = "None"
+        msg = "Not found in APIC"
+    else:
+        print "{} found!".format(epDN)
+        result = "success"
+        ip = epMo.ip
+        encap = epMo.encap.split('-')
+        if len(encap) == 2:
+            vlan = encap[1]
+        else:
+            vlan = "None"
+
+        msg = "ok"
+    apicMoDir.logout()
+    resp = getEPResp(result, msg, ip, vlan)
+    print resp
     return resp
 
 ################################################################################
