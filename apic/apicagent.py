@@ -16,7 +16,7 @@ import sys
 from cobra.mit.access import MoDirectory
 from cobra.mit.session import LoginSession
 from cobra.mit.session import CertSession
-from cobra.mit.request import ConfigRequest
+from cobra.mit.request import ConfigRequest, DnQuery
 from cobra.model.fv import Tenant
 from cobra.model.fv import Ctx
 from cobra.model.fv import BD
@@ -297,6 +297,18 @@ def setupTenant(spec, apicMoDir):
     return ['success', 'ok']
 
 # create a bd and subnet if it does not exist
+def findTenantVrfContexts(spec, apicMoDir):
+    tenant = spec['tenant']
+    tenantDn = formTenantDn(tenant)
+    dnQuery = DnQuery(tenantDn)
+    dnQuery.subtree = 'children'
+    tenantMo = apicMoDir.query(dnQuery)
+    if len(tenantMo) > 0:
+        # We expect only 1 tenant with that name
+        return tenantMo[0].ctx
+    else:
+        return []
+    
 def setupSubnet(spec, apicMoDir):
     # Check if we are going to be using the provided bridge domain.
     # In that case, we don't need to create a subnet/BD.
@@ -314,6 +326,7 @@ def setupSubnet(spec, apicMoDir):
     tenant = spec['tenant']
     bdName = formBDName(tenant, netmask[0])
     bdDn = formBDDn(tenant, bdName)
+
     # Check if this BD already exists within this tenant context.
     exists, fvBDMo = checkDnExists(apicMoDir, bdDn)
     if exists:
@@ -321,11 +334,26 @@ def setupSubnet(spec, apicMoDir):
         subnetDict[gw] = fvBDMo
     else:
         print "Creating BD %s under tenant %s" % (bdName, tenant)
+        # Check if there is a VRF to tie the BD. If not, create one.
         tenMo = tenantDict[tenant]
+        ctxMos = findTenantVrfContexts(spec, apicMoDir)
+        print "Fetched context mos:"
+        print ctxMos
+        if len(ctxMos) == 0:
+            # No VRFs found. Need to create one.
+            tenVrfName = formTenantVRFName(tenant)
+            ctxMo = Ctx(tenMo, tenVrfName)
+            cR = ConfigRequest()
+            cR.addMo(ctxMo)
+            apicMoDir.commit(cR)
+        elif len(ctxMos) > 1:
+            return ['failed', 'Multiple VRFs under tenant not supported yet']
+        else:
+            for ctxMo in ctxMos:
+                tenVrfName = ctxMo.name
+
         fvBDMo = BD(tenMo, name=bdName)
-        # associate to nw context
-        tenVrf = formTenantVRFName(tenant)
-        RsCtx(fvBDMo, tnFvCtxName=tenVrf)
+        RsCtx(fvBDMo, tnFvCtxName=tenVrfName)
         # create subnet
         Subnet(fvBDMo, gw)
         cR = ConfigRequest()
