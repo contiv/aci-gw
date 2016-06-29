@@ -297,8 +297,7 @@ def setupTenant(spec, apicMoDir):
     return ['success', 'ok']
 
 # create a bd and subnet if it does not exist
-def findTenantVrfContexts(spec, apicMoDir):
-    tenant = spec['tenant']
+def findTenantVrfContexts(tenant, apicMoDir):
     tenantDn = formTenantDn(tenant)
     dnQuery = DnQuery(tenantDn)
     dnQuery.subtree = 'children'
@@ -309,57 +308,45 @@ def findTenantVrfContexts(spec, apicMoDir):
     else:
         return []
     
-def setupSubnet(spec, apicMoDir):
-    # Check if we are going to be using the provided bridge domain.
-    # In that case, we don't need to create a subnet/BD.
-    bridgeDomain = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
-    if bridgeDomain != "not_specified":
-	    # Use what has been provided.
-        return ['success', 'ok']
-         
-    gw = spec['subnet']
+def createBridgeDomain(tenant, epgSpec, apicMoDir):
+    gw = epgSpec['gwcidr']
 
     netmask = gw.split('/')
     if len(netmask) != 2:
     	return ['failed', 'invalid subnet']
     
-    tenant = spec['tenant']
-    bdName = formBDName(tenant, netmask[0])
+    bdName = epgSpec['nwname']
     bdDn = formBDDn(tenant, bdName)
 
-    # Check if this BD already exists within this tenant context.
-    exists, fvBDMo = checkDnExists(apicMoDir, bdDn)
-    if exists:
-        print "BD %s exists under tenant %s" % (bdName, tenant)
-        subnetDict[gw] = fvBDMo
-    else:
-        print "Creating BD %s under tenant %s" % (bdName, tenant)
-        # Check if there is a VRF to tie the BD. If not, create one.
-        tenMo = tenantDict[tenant]
-        ctxMos = findTenantVrfContexts(spec, apicMoDir)
-        print "Fetched context mos:"
-        print ctxMos
-        if len(ctxMos) == 0:
-            # No VRFs found. Need to create one.
-            tenVrfName = formTenantVRFName(tenant)
-            ctxMo = Ctx(tenMo, tenVrfName)
-            cR = ConfigRequest()
-            cR.addMo(ctxMo)
-            apicMoDir.commit(cR)
-        elif len(ctxMos) > 1:
-            return ['failed', 'Multiple VRFs under tenant not supported yet']
-        else:
-            for ctxMo in ctxMos:
-                tenVrfName = ctxMo.name
-
-        fvBDMo = BD(tenMo, name=bdName)
-        RsCtx(fvBDMo, tnFvCtxName=tenVrfName)
-        # create subnet
-        Subnet(fvBDMo, gw)
+    print "Creating BD %s under tenant %s" % (bdName, tenant)
+    # Check if there is a VRF to tie the BD. If not, create one.
+    tenMo = tenantDict[tenant]
+    ctxMos = findTenantVrfContexts(tenant, apicMoDir)
+    print "Fetched context mos:"
+    print ctxMos
+    if len(ctxMos) == 0:
+        # No VRFs found. Need to create one.
+        tenVrfName = formTenantVRFName(tenant)
+        ctxMo = Ctx(tenMo, tenVrfName)
         cR = ConfigRequest()
-        cR.addMo(fvBDMo)
+        cR.addMo(ctxMo)
         apicMoDir.commit(cR)
-        subnetDict[gw] = fvBDMo
+    elif len(ctxMos) > 1:
+        print "Multi VRF scenario requires pre-created BDs"
+        return ['failed', 'Multiple VRFs under tenant not supported yet']
+    else:
+        for ctxMo in ctxMos:
+            tenVrfName = ctxMo.name
+
+    fvBDMo = BD(tenMo, name=bdName)
+    RsCtx(fvBDMo, tnFvCtxName=tenVrfName)
+    # create subnet
+    Subnet(fvBDMo, gw)
+    cR = ConfigRequest()
+    cR.addMo(fvBDMo)
+    apicMoDir.commit(cR)
+    subnetDict[gw] = fvBDMo
+    print "Created BD {}".format(bdName)
 
     return ['success', 'ok']
 
@@ -547,18 +534,23 @@ def setupConsumers(spec, apicMoDir):
         epgcR.addMo(epgMo)
         apicMoDir.commit(epgcR)
 
-def getBridgeDomainName(spec):
-    bridgeDomain = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
-    if bridgeDomain != "not_specified":
+def getBridgeDomain(tenant, epgSpec, apicMoDir):
+    bdName = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
+    if bdName != "not_specified":
 	# Use what has been provided.
-        return bridgeDomain
+        return bdName
 
-    tenant = spec['tenant']
-    gateway = spec['subnet']
-    netmask = gateway.split('/')
-    bridgeDomain = tenant + '-' + netmask[0]
+    bdName = epgSpec['nwname']
+    bdDn = formBDDn(tenant, bdName)
 
-    return bridgeDomain
+    # Check if this BD already exists within this tenant context.
+    exists, fvBDMo = checkDnExists(apicMoDir, bdDn)
+    if exists:
+	print "epg {} will use existing BD {}".format(epgSpec['name'], bdName)
+        return bdName
+
+    createBridgeDomain(tenant, epgSpec, apicMoDir)
+    return bdName
 
 
 # create EPGs and contracts per the app spec
@@ -589,15 +581,14 @@ def setupApp(spec, apicMoDir):
     cR = ConfigRequest()
     cR.addMo(fvApMo)
 
-    # Get the bridge domain
-    bdName = getBridgeDomainName(spec)
-
     #if nodeid is passed, use that
     leafNodes = os.getenv('APIC_LEAF_NODE', contivDefNode)
     leafList = leafNodes.split(",")
 
     # Walk the EPG list and create them.
     for epg in epgList:
+        # Get the bridge domain for this epg
+        bdName = getBridgeDomain(tenant, epg, apicMoDir)
         epgName = epg['name']
         fvEpg = AEPg(fvApMo, epgName)
         # associate to BD
@@ -793,11 +784,6 @@ def create_api():
         return resp
 
     setupTenant(jsData, apicMoDir)
-    ret = setupSubnet(jsData, apicMoDir)
-    if ret[0] != 'success':
-        resp = getResp(ret[0], ret[1])
-        apicMoDir.logout()
-        return resp
 
     ret = setupApp(jsData, apicMoDir)
     apicMoDir.logout()
@@ -812,15 +798,6 @@ def validateData(jsData):
     if topData['tenant'] is 'missing':
         print "tenant: name is missing"
         return ['failed', 'tenant name missing']
-
-    if topData['subnet'] is 'missing':
-        print "subnet is missing"
-        return ['failed', 'subnet missing']
-
-    gw = jsData['subnet']
-    netmask = gw.split('/')
-    if len(netmask) != 2:
-        return ['failed', 'invalid subnet']
 
     if topData['app'] is 'missing':
         return ['failed', 'appname missing']
@@ -843,6 +820,12 @@ def validateData(jsData):
         epg = SafeDict(e)
         if epg['name'] is 'missing':
             return ['failed', 'epg must have a name']
+
+        if epg['nwname'] is 'missing':
+            return ['failed', 'epg must have a network name']
+
+        if epg['gwcidr'] is 'missing':
+            return ['failed', 'epg must have a gw cidr']
 
         if epg['vlantag'] is 'missing':
             return ['failed', 'epg must have a vlantag']
