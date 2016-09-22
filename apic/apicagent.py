@@ -31,7 +31,7 @@ from cobra.model.vz import Filter, Entry, BrCP, Subj, RsSubjFiltAtt
 from flask import Flask
 from flask import json, request, Response
 
-aciGwVersion = "v1.1"
+aciGwApiVer = "v1.1"
 DefACIKeyFile = "/aciconfig/aci.key"
 contivDefTenant = 'ContivTenant'
 # Node used by contiv
@@ -800,14 +800,14 @@ def create_api():
 def validateData(jsData):
     topData = SafeDict(jsData)
     # validate top level
-    topMandatory = set(['aci-gw-version', 'tenant', 'app-prof', 'epgs'])
+    topMandatory = set(['aci-gw-api-version', 'tenant', 'app-prof', 'epgs'])
     topOpt = set(['contract-defs'])
     res = topData.Validate(topMandatory, topOpt, "Top level")
     if res[0] != 'ok':
         return res
 
-    needVer = topData['aci-gw-version']
-    gotVer = aciGwVersion
+    needVer = topData['aci-gw-api-version']
+    gotVer = aciGwApiVer
     if needVer != gotVer:
         err = "GW Version mismatch. Need: {} Found: {}".format(needVer, gotVer)
         print err
