@@ -773,6 +773,7 @@ def create_api():
         resp = getResp('invalid-args', valid[1])
         return resp
 
+    apicUrl = os.environ.get('APIC_URL') 
     if apicUrl == 'SANITY':
         resp = getResp(valid[0], valid[1])
         return resp
