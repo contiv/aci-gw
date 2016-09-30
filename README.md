@@ -18,7 +18,7 @@ docker build --build-arg APIC_URL=<apic_url> --build-arg APIC_PKG_VERSION=<apic_
 
 Example:
 ```
-docker build --build-arg APIC_URL=172.31.152.18 --build-arg APIC_PKG_VERSION=1.1_1.67-py2.7 -t contiv/aci-gw -f Dockerfile .
+docker build --build-arg APIC_URL=172.31.152.18 --build-arg APIC_PKG_VERSION=1.1_1.67-py2.7 -t contiv/aci-gw:09-27-2016.2.0_2g -f Dockerfile .
 ```
 
 ### Pre-requisites for ACI setup

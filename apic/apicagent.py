@@ -31,6 +31,7 @@ from cobra.model.vz import Filter, Entry, BrCP, Subj, RsSubjFiltAtt
 from flask import Flask
 from flask import json, request, Response
 
+aciGwApiVer = "v1.1"
 DefACIKeyFile = "/aciconfig/aci.key"
 contivDefTenant = 'ContivTenant'
 # Node used by contiv
@@ -40,6 +41,25 @@ class SafeDict(dict):
     'Provide a default value for missing keys'
     def __missing__(self, key):
         return 'missing'
+    'Verify presence of mandatory and optional keys'
+    def Validate(self, mandatory, optional, prefix):
+        present = set()
+        for key in self:
+            present.add(key)
+
+        diff = mandatory.symmetric_difference(present)
+        absent = mandatory.intersection(diff)
+        if len(absent) != 0:
+            errMsg = "{}:Missing mandatory fields: {}".format(prefix, absent)
+            return ['failed', errMsg]
+
+        if not diff.issubset(optional):
+            unknown = diff - optional
+            errMsg = "{}:Unknown fields: {}".format(prefix, unknown)
+            return ['failed', errMsg]
+
+        return ['ok', ""]
+
 
 class ObjDict(dict):
     'Provide a default value for missing keys'
@@ -309,13 +329,13 @@ def findTenantVrfContexts(tenant, apicMoDir):
         return []
     
 def createBridgeDomain(tenant, epgSpec, apicMoDir):
-    gw = epgSpec['gwcidr']
+    gw = epgSpec['gw-cidr']
 
     netmask = gw.split('/')
     if len(netmask) != 2:
     	return ['failed', 'invalid subnet']
     
-    bdName = epgSpec['nwname']
+    bdName = epgSpec['nw-name']
     bdDn = formBDDn(tenant, bdName)
 
     print "Creating BD %s under tenant %s" % (bdName, tenant)
@@ -360,33 +380,36 @@ def ipProtoNametoNumber(protoString):
     else:
         return -1
 
-def addProvidedContracts(spec, apicMoDir):
+def addDefinedContracts(spec, apicMoDir):
 
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
-    appName = spec['app']
-    epgList = spec['epgs']
+    appName = spec['app-prof']
     resrcList = []
+
+    contracts = spec['contract-defs']
+    if contracts is 'missing':
+        print "No defined contracts in {}".format(appName)
+        return
 
     cR = ConfigRequest()
     cR.addMo(tenMo)
 
-    for e in epgList:
-        epg = SafeDict(e)
-        serviceName = epg['name']
-        filters = epg['filterinfo']
-        if filters is 'missing':
-            print "No provider in ", serviceName
-            continue
-
-        print ">>Provider ", filters, serviceName
-        epgcR = ConfigRequest()
+    for cc in contracts:
+        c = SafeDict(cc)
+        print ">> Adding contract {}".format(c['name'])
+        contractCR = ConfigRequest()
         # filter container
-        filterName = 'filt-' + appName + serviceName
+        filterName = 'filt-' + c['name']
         filterMo = Filter(tenMo, filterName)
         # save the filter dn to this app's resource list
         resrcList.append(filterMo) 
     
+	filters = c['filter-info']
+        print filters
+        if filters is 'missing':
+            print "ERROR no filters in contract"
+            continue
 	for eachEntry in filters:
 	    filterEntry = SafeDict(eachEntry)
             ipProtocol = filterEntry['protocol']
@@ -407,7 +430,7 @@ def addProvidedContracts(spec, apicMoDir):
             if filterPort > 0:
                 entryName = entryName + '-' + servPort          
 
-            print "creating filter entry %s", entryName
+            print "creating filter entry {}".format(entryName)
             entryMo = Entry(filterMo, entryName)
             entryMo.etherT = etherType
             if filterProto > 0:
@@ -419,23 +442,19 @@ def addProvidedContracts(spec, apicMoDir):
                     entryMo.dToPort = filterPort
     
         # contract container
-        ccName = 'contr-' + appName + serviceName
+        ccName = c['name']
         print '==>contract name:', ccName 
         ccMo = BrCP(tenMo, ccName)
         # save the contract dn to this app's resource list
         resrcList.append(ccMo) 
         
         # subject for associating filter to contract
-        subjName = 'subj-' + serviceName
+        subjName = 'subj-' + ccName
         subjMo = Subj(ccMo, subjName)
         RsSubjFiltAtt(subjMo, tnVzFilterName=filterMo.name)
-        epgDn = 'uni/tn-' + tenant + '/ap-' + appName + '/epg-' + serviceName
-        # RsProv does not like Dn need to look up parent
-        epgMo = apicMoDir.lookupByDn(epgDn)
-        provMo = RsProv(epgMo, tnVzBrCPName=ccMo.name)
-        epgcR.addMo(epgMo)
-        apicMoDir.commit(epgcR)
-    
+        contractCR.addMo(ccMo)
+        apicMoDir.commit(contractCR)
+
     cR = ConfigRequest()
     cR.addMo(tenMo)
     apicMoDir.commit(cR)
@@ -446,7 +465,7 @@ def addProvidedContracts(spec, apicMoDir):
 def setupUnenforcedMode(spec, apicMoDir):
     epgList = spec['epgs']
     tenant = spec['tenant']
-    appName = spec['app']
+    appName = spec['app-prof']
 
     for e in epgList:
         epg = SafeDict(e)
@@ -461,19 +480,20 @@ def setupUnenforcedMode(spec, apicMoDir):
         epgcR.addMo(epgMo)
         apicMoDir.commit(epgcR)
 
-def setupPerEpgProvConsContracts(spec, apicMoDir):
+def addContractLinks(spec, apicMoDir):
     epgList = spec['epgs']
     tenant = spec['tenant']
-    appName = spec['app']
+    appName = spec['app-prof']
+    tenMo = tenantDict[tenant]
 
     for e in epgList:
         epg = SafeDict(e)
         epgName = epg['name']
-        if epg['conscontracts'] is 'missing' and epg['provcontracts'] is 'missing':
-            print "No external contracts/policies for this EPG %s" % (epgName)
+	links = epg['contract-links']
+        if links is 'missing':
+            print "No contract links specified for epg {}".format(epgName)
             continue
 
-        print "Setting up external contracts for %s" % (epgName)
         epgDn = 'uni/tn-' + tenant + '/ap-' + appName + '/epg-' + epgName
         epgMo = apicMoDir.lookupByDn(epgDn)
 		
@@ -481,58 +501,46 @@ def setupPerEpgProvConsContracts(spec, apicMoDir):
         # done. Typically, should not happen.
         if epgMo is None:
             print "Could not locate epg %s within tenant %s" % (epgName, tenant)
-            continue
-			
+            return ['ERROR', "Could not locate epg {}".format(epgName)]
+
         epgcR = ConfigRequest()
+        for l in links:
+            link = SafeDict(l)
 
-        if epg['conscontracts'] is not 'missing':
-            for oneContractDn in epg['conscontracts']:
-                contrMo = apicMoDir.lookupByDn(oneContractDn)
-                if contrMo is None:
-                    # The specified contract is not present.
-                    # Move on with the next contract.
-                    continue                        
-                consMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
+            cKind = link['contract-kind']
+            if cKind != "EXTERNAL" and cKind != "INTERNAL":
+                print "Unknown contract-kind"
+                return ['ERROR', "Unknown contract-kind {}".format(cKind)]
 
-        if epg['provcontracts'] is not 'missing':
-            for oneContractDn in epg['provcontracts']:
-                contrMo = apicMoDir.lookupByDn(oneContractDn)
+            if cKind == "EXTERNAL":
+                contrMo = apicMoDir.lookupByDn(link['contract-dn'])
                 if contrMo is None:
-                    # The specified contract is not present.
-                    # Move on with the next contract.
-                    continue                        
-                consMo = RsProv(epgMo, tnVzBrCPName=contrMo.name)
+                    print "ERROR external contract {} not found".format(link['contract-dn'])
+                    return ['ERROR', "No ext contract {}".format(link['contract-dn'])]
+
+            if cKind == "INTERNAL":
+                ccName = link['contract-name']
+                contractDN = 'uni/tn-' + tenant + '/brc-' + ccName
+                contrMo = apicMoDir.lookupByDn(contractDN)
+                if contrMo is None:
+                    #add the cc Mo, so we can setup the link
+                    contrMo = BrCP(tenMo, ccName)
+                    ccCR = ConfigRequest()
+                    ccCR.addMo(contrMo)
+                    apicMoDir.commit(ccCR)
+
+            # at this point, we are ready to add cons/prov link
+            if link['link-kind'] == "CONSUME":
+                linkMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
+                print "epg {} consumes {}".format(epgName, contrMo.name)
+            else:
+                linkMo = RsProv(epgMo, tnVzBrCPName=contrMo.name)
+                print "epg {} provides {}".format(epgName, contrMo.name)
 
         epgcR.addMo(epgMo)
         apicMoDir.commit(epgcR)
 
-def setupConsumers(spec, apicMoDir):
-
-    tenant = spec['tenant']
-    tenMo = tenantDict[tenant]
-    appName = spec['app']
-    epgList = spec['epgs']
-
-    for e in epgList:
-        epg = SafeDict(e)
-        epgName = epg['name']
-        epgDn = 'uni/tn-' + tenant + '/ap-' + appName + '/epg-' + epgName
-        epgMo = apicMoDir.lookupByDn(epgDn)
-        consumeList = epg['uses']
-        if epg['uses'] is 'missing':
-            continue
-
-        epgcR = ConfigRequest()
-        for service in consumeList:
-            ccName = 'contr-' + appName + service
-            contrDn = 'uni/tn-' + tenant + '/brc-' + ccName
-            contrMo = apicMoDir.lookupByDn(contrDn)
-            # RsCons does not like Dn need to look up parent
-            consMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
-            print '<<', epgName, 'consumes', service
-
-        epgcR.addMo(epgMo)
-        apicMoDir.commit(epgcR)
+    return ['success', 'ok']
 
 def getBridgeDomain(tenant, epgSpec, apicMoDir):
     bdName = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
@@ -540,7 +548,7 @@ def getBridgeDomain(tenant, epgSpec, apicMoDir):
 	# Use what has been provided.
         return bdName
 
-    bdName = epgSpec['nwname']
+    bdName = epgSpec['nw-name']
     bdDn = formBDDn(tenant, bdName)
 
     # Check if this BD already exists within this tenant context.
@@ -556,7 +564,7 @@ def getBridgeDomain(tenant, epgSpec, apicMoDir):
 # create EPGs and contracts per the app spec
 def setupApp(spec, apicMoDir):
     # create an app prof if it does not exist.
-    appName = spec['app']
+    appName = spec['app-prof']
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
     epgList = spec['epgs']
@@ -587,7 +595,7 @@ def setupApp(spec, apicMoDir):
 
     # Walk the EPG list and create them.
     for epg in epgList:
-        # Get the bridge domain for this epg
+        # Get the bridge domain for this epg, will create if needed
         bdName = getBridgeDomain(tenant, epg, apicMoDir)
         epgName = epg['name']
         fvEpg = AEPg(fvApMo, epgName)
@@ -597,7 +605,7 @@ def setupApp(spec, apicMoDir):
         contivClusterDom = 'uni/phys-' + physDom
         RsDomAtt(fvEpg, contivClusterDom)
         # TODO: add static binding
-        vlan = epg['vlantag']
+        vlan = epg['vlan-tag']
         encapid = 'vlan-' + vlan
         for leaf in leafList:
             RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
@@ -609,19 +617,19 @@ def setupApp(spec, apicMoDir):
         print "Setting up EPG in un-enforced mode."
         setupUnenforcedMode(spec, apicMoDir)
     else:
-        print "Establishing provided contracts."
-        addProvidedContracts(spec, apicMoDir)
-        print "Establishing consumed contracts."
-        setupConsumers(spec, apicMoDir)
-        print "Establishing pre-defined contracts."
-        setupPerEpgProvConsContracts(spec, apicMoDir)
+        print "Establishing policy contracts."
+        addDefinedContracts(spec, apicMoDir)
+        print "Establishing consumer/provider links."
+        ret = addContractLinks(spec, apicMoDir)
+        if ret[0] != 'success':
+            return ret
 
     return ['success', 'ok']
 
 # delete App profile and any contracts/filter allocated for it
 def deleteApp(spec, apicMoDir):
     # create an app prof if it does not exist.
-    appName = spec['app']
+    appName = spec['app-prof']
     tenant = spec['tenant']
 
     tenMo = tenantDict[tenant]
@@ -697,7 +705,7 @@ def delete_api():
         resp = getResp('unchanged', 'tenant name missing')
         return resp
 
-    if topData['app'] is 'missing':
+    if topData['app-prof'] is 'missing':
         print "app name is missing"
         resp = getResp('unchanged', 'app name missing')
         return resp
@@ -719,7 +727,7 @@ def delete_api():
     return resp
 
 ################################################################################
-def validatePredefContracts(jsData, apicMoDir):
+def validateExternalContracts(jsData, apicMoDir):
     topData = SafeDict(jsData)
 
     epgList = jsData['epgs']
@@ -728,30 +736,28 @@ def validatePredefContracts(jsData, apicMoDir):
     for e in epgList:
         epg = SafeDict(e)
         epgName = epg['name']
-        if epg['conscontracts'] is 'missing' and epg['provcontracts'] is 'missing':
+        if epg['contract-links'] is 'missing':
             # No external contracts to validate.
-            print "nothing to validate"
+            print "epg {} -- no links to validate".format(epgName)
             continue
 
-        if epg['conscontracts'] is not 'missing':
-            for oneContractDn in epg['conscontracts']:
-                contrMo = apicMoDir.lookupByDn(oneContractDn)
-                if contrMo is None:
-                    # Contract not found. Bail.
-                    print "Contract %s not found" % (oneContractDn)
-                    return ['failed', "External contract(s) not found."]
+        links = epg['contract-links']
+        for l in links:
+            link = SafeDict(l)
+            if link['contract-kind'] != "EXTERNAL":
+                continue
 
-        if epg['provcontracts'] is not 'missing':
-            for oneContractDn in epg['provcontracts']:
-                contrMo = apicMoDir.lookupByDn(oneContractDn)
-                if contrMo is None:
-                    # Contract not found. Bail.
-                    print "Contract %s not found" % (oneContractDn)
-                    return ['failed', "External contract(s) not found."]
-
+            contractDN = link['contract-dn']
+            if contractDN is 'missing':
+                    return ['failed', "Missing DN for external contract - epg {}".format(epgName)]
+      
+            contrMo = apicMoDir.lookupByDn(contractDN)
+            if contrMo is None:
+                    return ['failed', "External contract {} not found in APIC.".format(contractDN)]
+	
     return ['success', 'LGTM']
 
-    
+################################################################################
 @app.route("/createAppProf", methods=['POST'])
 def create_api():
     if request.headers['Content-Type'] != 'application/json':
@@ -767,6 +773,7 @@ def create_api():
         resp = getResp('invalid-args', valid[1])
         return resp
 
+    apicUrl = os.environ.get('APIC_URL') 
     if apicUrl == 'SANITY':
         resp = getResp(valid[0], valid[1])
         return resp
@@ -778,7 +785,7 @@ def create_api():
 
     apicMoDir.login()
 
-    valid = validatePredefContracts(jsData, apicMoDir)
+    valid = validateExternalContracts(jsData, apicMoDir)
     if not valid[0] is 'success':
         resp = getResp('invalid-args', valid[1])
         return resp
@@ -791,67 +798,37 @@ def create_api():
     return resp
 
 ################################################################################
-
 def validateData(jsData):
     topData = SafeDict(jsData)
-    # make sure we have tenant, subnet and app at top level
-    if topData['tenant'] is 'missing':
-        print "tenant: name is missing"
-        return ['failed', 'tenant name missing']
+    # validate top level
+    topMandatory = set(['aci-gw-api-version', 'tenant', 'app-prof', 'epgs'])
+    topOpt = set(['contract-defs'])
+    res = topData.Validate(topMandatory, topOpt, "Top level")
+    if res[0] != 'ok':
+        return res
 
-    if topData['app'] is 'missing':
-        return ['failed', 'appname missing']
-
-    if not 'epgs' in jsData:
-        return ['failed', 'epg list missing']
-
+    needVer = topData['aci-gw-api-version']
+    gotVer = aciGwApiVer
+    if needVer != gotVer:
+        err = "GW Version mismatch. Need: {} Found: {}".format(needVer, gotVer)
+        print err
+        return ['failed', err]
+        
     epgList = jsData['epgs']
-
     if len(epgList) == 0:
         return ['failed', 'empty/missing epglist']
 
-    consumeSet = set()
-    provideSet = set()
+    epgMustFields = set(['name', 'nw-name', 'gw-cidr', 'vlan-tag'])
+    epgOptFields = set(['contract-links'])
     for e in epgList:
         if not isinstance(e, dict):
             ss = 'epg must be a dict, is' + str(type(e))
             return ['failed', ss]
 
         epg = SafeDict(e)
-        if epg['name'] is 'missing':
-            return ['failed', 'epg must have a name']
-
-        if epg['nwname'] is 'missing':
-            return ['failed', 'epg must have a network name']
-
-        if epg['gwcidr'] is 'missing':
-            return ['failed', 'epg must have a gw cidr']
-
-        if epg['vlantag'] is 'missing':
-            return ['failed', 'epg must have a vlantag']
-
-        # build set of provided services
-        if not epg['filterinfo'] is 'missing':
-            provideSet.add(epg['name'])
-
-        if epg['uses'] is 'missing':
-            print 'no consume specified for', epg['name']
-            continue
-
-        consumeList = epg['uses']
-
-        # build the set of consumed services
-        for c in consumeList:
-            consumeSet.add(c)
-
-    if not consumeSet.issubset(provideSet):
-            diff = consumeSet - provideSet
-            s1 = 'no provider for: '
-            for item in diff:
-                s1 += item
-                s1 += ', '
-            print s1
-            return ['failed', s1]
+        res = epg.Validate(epgMustFields, epgOptFields, "EPG")
+        if res[0] != 'ok':
+            return res
 
     return ['success', 'LGTM']
 
@@ -912,7 +889,7 @@ def endpoint_api():
         return resp
 
     apicMoDir.login()
-    epDN = "uni/tn-" + topData['tenant'] + "/ap-" + topData['app'] + \
+    epDN = "uni/tn-" + topData['tenant'] + "/ap-" + topData['app-prof'] + \
            "/epg-" + topData['epg'] + "/cep-" + topData['epmac']
     epMo = apicMoDir.lookupByDn(epDN)
     if epMo is None:
