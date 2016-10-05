@@ -562,8 +562,9 @@ def getBridgeDomain(tenant, epgSpec, apicMoDir):
 
 
 # create EPGs and contracts per the app spec
-def setupApp(spec, apicMoDir):
+def setupApp(appSpec, apicMoDir):
     # create an app prof if it does not exist.
+    spec = SafeDict(appSpec)
     appName = spec['app-prof']
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
