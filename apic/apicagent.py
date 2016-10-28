@@ -13,6 +13,7 @@
 
 import os
 import sys
+import logging
 from cobra.mit.access import MoDirectory
 from cobra.mit.session import LoginSession
 from cobra.mit.session import CertSession
@@ -25,12 +26,22 @@ from cobra.model.fv import Subnet
 from cobra.model.fv import Ap
 from cobra.model.fv import AEPg
 from cobra.model.fv import RsBd
-from cobra.model.fv import RsDomAtt, RsNodeAtt
+from cobra.model.fv import RsDomAtt, RsNodeAtt, RsPathAtt
 from cobra.model.fv import RsProv, RsCons, CEp
 from cobra.model.vz import Filter, Entry, BrCP, Subj, RsSubjFiltAtt
 from flask import Flask
 from flask import json, request, Response
 
+##############################################################################
+supportedLogLevels = ['INFO', 'DEBUG', 'ERROR']
+logLevel = os.getenv('LOG_LEVEL', 'INFO')
+print 'Loglevel is set to : %s' % logLevel
+if logLevel not in supportedLogLevels:
+    print 'Supported log levels are: %s , defaulting to INFO' % (supportedLogLevels)
+    logLevel = 'INFO'
+logging.basicConfig(format='%(asctime)s:%(levelname)s:%(message)s', level=logLevel)
+
+##############################################################################
 aciGwApiVer = "v1.1"
 DefACIKeyFile = "/aciconfig/aci.key"
 contivDefTenant = 'ContivTenant'
@@ -71,182 +82,8 @@ class OperDict(dict):
     def __missing__(self, key):
         return printSupport
 
-def createTenant(moDir):
-    uniMo = moDir.lookupByDn('uni')
-    fvTenantMo = Tenant(uniMo, 'ContivTenant')
-    cR = ConfigRequest()
-    cR.addMo(fvTenantMo)
-    moDir.commit(cR)
-
-def createPvtNw(moDir, tenantDn):
-    ctxMo = Ctx(tenantDn, 'ContivPvtVrf')
-    cR = ConfigRequest()
-    cR.addMo(ctxMo)
-    moDir.commit(cR)
-
-def createPvtNwWrapper(moDir):
-    createPvtNw(moDir, 'uni/tn-ContivTenant')
-
-def createBdSubnet(moDir):
-    if len(sys.argv) < 4:
-        print "Pls specify a subnet a.b.c.d/n"
-        sys.exit(2)
-
-    ip = sys.argv[3]
-    netmask = ip.split('/')
-    if len(netmask) != 2:
-        print "Pls specify a subnet a.b.c.d/n"
-        sys.exit(2)
-
-    bdName = 'ContivBD' + netmask[0]
-    fvBDMo = BD('uni/tn-ContivTenant', name=bdName)
-    # associate to nw context
-    RsCtx(fvBDMo, tnFvCtxName='ContivPvtVrf')
-    # create subnet
-    Subnet(fvBDMo, ip)
-    cR = ConfigRequest()
-    cR.addMo(fvBDMo)
-    moDir.commit(cR)
-
-def createAppProf(moDir):
-    if len(sys.argv) < 5:
-        print "Pls specify a subnet a.b.c.d/n and app"
-        sys.exit(2)
-
-    ip = sys.argv[3]
-    netmask = ip.split('/')
-    if len(netmask) != 2:
-        print "Pls specify a subnet a.b.c.d/n"
-        sys.exit(2)
-
-    bdName = 'ContivBD' + netmask[0]
-    appName = sys.argv[4]
-    fvApMo = Ap('uni/tn-ContivTenant', appName)
-    cR = ConfigRequest()
-    cR.addMo(fvApMo)
-    moDir.commit(cR)
-
-def createEpg(moDir):
-    if len(sys.argv) < 6:
-        print "Pls specify a subnet a.b.c.d/n, app and epg"
-        sys.exit(2)
-
-    ip = sys.argv[3]
-    netmask = ip.split('/')
-    if len(netmask) != 2:
-        print "Pls specify a subnet a.b.c.d/n"
-        sys.exit(2)
-
-    bdName = 'ContivBD' + netmask[0]
-    appName = sys.argv[4]
-    appDn = 'uni/tn-' + contivDefTenant + '/ap-' + appName
-    epgName = sys.argv[5]
-    fvEpg = AEPg(appDn, epgName)
-
-    # associate to BD
-    RsBd(fvEpg, tnFvBDName=bdName)
-    # associate to phy domain
-    physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
-    if physDom == "not_specified":
-        print "Pls specify a physical domain"
-        sys.exit(2)    
-
-    contivClusterDom = 'uni/phys-' + physDom
-    RsDomAtt(fvEpg, contivClusterDom)
-    # TODO: add static binding
-    cR = ConfigRequest()
-    cR.addMo(fvEpg)
-    moDir.commit(cR)
-
-def createServiceContract(moDir):
-    if len(sys.argv) < 5:
-        print "Pls specify a label and dPort"
-        sys.exit(2)
-
-    serviceName = sys.argv[3]
-    dPort = sys.argv[4]
-
-    tenMo = moDir.lookupByDn('uni/tn-ContivTenant')
-    # filter container
-    filterName = 'filter-' + serviceName
-    filterMo = Filter(tenMo, filterName)
-
-    # filter entry for the given port
-    entryName = 'entryPort-' + dPort
-    entryMo = Entry(filterMo, entryName)
-    entryMo.dFromPort = int(dPort)
-    entryMo.dToPort = int(dPort)
-    entryMo.prot = 6  # tcp
-    entryMo.etherT = 'ip'
-
-    # contract container
-    ccName = 'contr-' + serviceName
-    ccMo = BrCP(tenMo, ccName)
-    
-    # subject for associating filter to contract
-    subjName = 'subj-' + serviceName
-    subjMo = Subj(ccMo, subjName)
-    RsSubjFiltAtt(subjMo, tnVzFilterName=filterMo.name)
-
-    cR = ConfigRequest()
-    cR.addMo(tenMo)
-    moDir.commit(cR)
-
-def setupServiceProvider(moDir):
-    if len(sys.argv) < 6:
-        print "Pls specify an app, epg and contract"
-        sys.exit(2)
-
-    appName = sys.argv[3]
-    epgName = sys.argv[4]
-    serviceName = sys.argv[5]
-    contrDn = 'uni/tn-' + contivDefTenant + '/brc-' + 'contr-' + serviceName
-    contrMo = moDir.lookupByDn(contrDn)
-    epgDn = 'uni/tn-' + contivDefTenant + '/ap-' + appName + '/epg-' + epgName
-    # RsProv does not like Dn need to look up parent
-    epgMo = moDir.lookupByDn(epgDn)
-    provMo = RsProv(epgMo, tnVzBrCPName=contrMo.name)
-
-    cR = ConfigRequest()
-    cR.addMo(epgMo)
-    moDir.commit(cR)
-
-def addServiceConsumer(moDir):
-    if len(sys.argv) < 6:
-        print "Pls specify an app, epg and contract"
-        sys.exit(2)
-
-    appName = sys.argv[3]
-    epgName = sys.argv[4]
-    serviceName = sys.argv[5]
-    contrDn = 'uni/tn-' + contivDefTenant + '/brc-' + 'contr-' + serviceName
-    contrMo = moDir.lookupByDn(contrDn)
-    epgDn = 'uni/tn-' + contivDefTenant + '/ap-' + appName + '/epg-' + epgName
-    # RsProv does not like Dn need to look up parent
-    epgMo = moDir.lookupByDn(epgDn)
-    consMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
-
-    cR = ConfigRequest()
-    cR.addMo(epgMo)
-    moDir.commit(cR)
-
-# need to add delete contracts and BDs
-def deleteAppProf(moDir):
-    if len(sys.argv) < 4:
-        print "Pls specify an app"
-        sys.exit(2)
-
-    appName = sys.argv[3]
-    appDn = 'uni/tn-' + contivDefTenant + '/ap-' + appName
-    fvApMo = moDir.lookupByDn(appDn)
-
-    fvApMo.delete()
-    cR = ConfigRequest()
-    cR.addMo(fvApMo)
-    moDir.commit(cR)
-
 def printSupport(moDir):
-    print "Supported operations:"
+    logging.debug('Supported operations:')
     for oper in operDict:
         if oper != 'default':
             print oper
@@ -262,31 +99,31 @@ apicUrl = 'notset'
 
 # create a DN string for tenant
 def formTenantDn(tenantName):
+    logging.debug('Inside formTenantDn function')
     tenantDn = 'uni/tn-' + tenantName
     return tenantDn
 
 # form a name for a tenant VRF
 def formTenantVRFName(tenantName):
+    logging.debug('Inside formTenantVRFName function')
     tenVrfName = tenantName + '-Vrf'
     return tenVrfName
 
 # create a DN string for the bridge domain
 def formBDDn(tenantName, bdName):
+    logging.debug('Inside formBDDn function')
     bdDn = 'uni/tn-' + tenantName + '/BD-' + bdName
     return bdDn
 
-# form a name for the bridge domain
-def formBDName(tenantName, subnet):
-    bdName = tenantName + '-' + subnet
-    return bdName
-
 # create a DN string for the application profile
 def formAppProfDn(tenantName, appProfName):
+    logging.debug('Inside formAppProfDn function')
     appProfDn = 'uni/tn-' + tenantName + '/ap-' + appProfName
     return appProfDn
 
 # Wrapper to check if an DN already exists
 def checkDnExists(apicMoDir, dnStr):
+    logging.debug('Inside checkDnExists function')
     mo = apicMoDir.lookupByDn(dnStr)
     if mo is None:
         return (False, None)
@@ -295,16 +132,17 @@ def checkDnExists(apicMoDir, dnStr):
     
 # create a tenant if it does not exist.
 def setupTenant(spec, apicMoDir):
+    logging.debug('Inside setupTenant function')
     tenant = spec['tenant']
     # Check if the APIC already knows about this tenant
     tenantDn = formTenantDn(tenant)
     exists, fvTenantMo = checkDnExists(apicMoDir, tenantDn)
     if exists:
         # The tenant already exists in the APIC. Stash what we got.
-        print "Tenant %s already exists." % (tenant)
+        logging.info('Tenant %s already exists.' % tenant)
         tenantDict[tenant] = fvTenantMo
     else:
-        print "Creating tenant ", tenant
+        logging.info('Creating tenant %s' % tenant)
         uniMo = apicMoDir.lookupByDn('uni')
         fvTenantMo = Tenant(uniMo, tenant)
         # create a vrf for the tenant
@@ -318,6 +156,7 @@ def setupTenant(spec, apicMoDir):
 
 # create a bd and subnet if it does not exist
 def findTenantVrfContexts(tenant, apicMoDir):
+    logging.debug('Inside findTenantVrfContexts function')
     tenantDn = formTenantDn(tenant)
     dnQuery = DnQuery(tenantDn)
     dnQuery.subtree = 'children'
@@ -329,21 +168,22 @@ def findTenantVrfContexts(tenant, apicMoDir):
         return []
     
 def createBridgeDomain(tenant, epgSpec, apicMoDir):
+    logging.debug('Inside createBridgeDomain function')
     gw = epgSpec['gw-cidr']
 
     netmask = gw.split('/')
     if len(netmask) != 2:
-    	return ['failed', 'invalid subnet']
+        return ['failed', 'invalid subnet']
     
     bdName = epgSpec['nw-name']
     bdDn = formBDDn(tenant, bdName)
 
-    print "Creating BD %s under tenant %s" % (bdName, tenant)
+    logging.info('Creating BD %s under tenant %s' % (bdName, tenant))
     # Check if there is a VRF to tie the BD. If not, create one.
     tenMo = tenantDict[tenant]
     ctxMos = findTenantVrfContexts(tenant, apicMoDir)
-    print "Fetched context mos:"
-    print ctxMos
+    logging.debug('Fetched context mos:')
+    logging.debug(ctxMos)
     if len(ctxMos) == 0:
         # No VRFs found. Need to create one.
         tenVrfName = formTenantVRFName(tenant)
@@ -352,7 +192,7 @@ def createBridgeDomain(tenant, epgSpec, apicMoDir):
         cR.addMo(ctxMo)
         apicMoDir.commit(cR)
     elif len(ctxMos) > 1:
-        print "Multi VRF scenario requires pre-created BDs"
+        logging.error('Multi VRF scenario requires pre-created BDs')
         return ['failed', 'Multiple VRFs under tenant not supported yet']
     else:
         for ctxMo in ctxMos:
@@ -366,11 +206,12 @@ def createBridgeDomain(tenant, epgSpec, apicMoDir):
     cR.addMo(fvBDMo)
     apicMoDir.commit(cR)
     subnetDict[gw] = fvBDMo
-    print "Created BD {}".format(bdName)
+    logging.info('Created BD {}'.format(bdName))
 
     return ['success', 'ok']
 
 def ipProtoNametoNumber(protoString):
+    logging.debug('Inside ipProtoNametoNumber function ')
     if protoString == 'icmp':
         return 1
     elif protoString == 'tcp':
@@ -381,7 +222,7 @@ def ipProtoNametoNumber(protoString):
         return -1
 
 def addDefinedContracts(spec, apicMoDir):
-
+    logging.debug('Inside addDefinedContracts function')
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
     appName = spec['app-prof']
@@ -389,7 +230,7 @@ def addDefinedContracts(spec, apicMoDir):
 
     contracts = spec['contract-defs']
     if contracts is 'missing':
-        print "No defined contracts in {}".format(appName)
+        logging.info('No defined contracts in {}'.format(appName))
         return
 
     cR = ConfigRequest()
@@ -397,7 +238,7 @@ def addDefinedContracts(spec, apicMoDir):
 
     for cc in contracts:
         c = SafeDict(cc)
-        print ">> Adding contract {}".format(c['name'])
+        logging.debug('>> Adding contract {}'.format(c['name']))
         contractCR = ConfigRequest()
         # filter container
         filterName = 'filt-' + c['name']
@@ -405,13 +246,13 @@ def addDefinedContracts(spec, apicMoDir):
         # save the filter dn to this app's resource list
         resrcList.append(filterMo) 
     
-	filters = c['filter-info']
-        print filters
+        filters = c['filter-info']
+        logging.debug(filters)
         if filters is 'missing':
-            print "ERROR no filters in contract"
+            logging.error('ERROR no filters in contract')
             continue
-	for eachEntry in filters:
-	    filterEntry = SafeDict(eachEntry)
+        for eachEntry in filters:
+            filterEntry = SafeDict(eachEntry)
             ipProtocol = filterEntry['protocol']
             servPort = filterEntry['servport']
 	   
@@ -420,7 +261,7 @@ def addDefinedContracts(spec, apicMoDir):
             filterPort = 0
             if ipProtocol is not 'missing':
                 filterProto = ipProtoNametoNumber(ipProtocol)
-	    if servPort is not 'missing':
+            if servPort is not 'missing':
                 filterPort = int(servPort)
 
             # Form the entry name
@@ -430,7 +271,7 @@ def addDefinedContracts(spec, apicMoDir):
             if filterPort > 0:
                 entryName = entryName + '-' + servPort          
 
-            print "creating filter entry {}".format(entryName)
+            logging.info('creating filter entry {}'.format(entryName))
             entryMo = Entry(filterMo, entryName)
             entryMo.etherT = etherType
             if filterProto > 0:
@@ -443,7 +284,7 @@ def addDefinedContracts(spec, apicMoDir):
     
         # contract container
         ccName = c['name']
-        print '==>contract name:', ccName 
+        logging.info('==>contract name:%s' % ccName)
         ccMo = BrCP(tenMo, ccName)
         # save the contract dn to this app's resource list
         resrcList.append(ccMo) 
@@ -463,6 +304,7 @@ def addDefinedContracts(spec, apicMoDir):
     appResourceDict[appKey] = resrcList
 
 def setupUnenforcedMode(spec, apicMoDir):
+    logging.debug('Inside setupUnenforcedMode function')
     epgList = spec['epgs']
     tenant = spec['tenant']
     appName = spec['app-prof']
@@ -481,6 +323,7 @@ def setupUnenforcedMode(spec, apicMoDir):
         apicMoDir.commit(epgcR)
 
 def addContractLinks(spec, apicMoDir):
+    logging.debug('Inside addContractLinks function')
     epgList = spec['epgs']
     tenant = spec['tenant']
     appName = spec['app-prof']
@@ -489,9 +332,9 @@ def addContractLinks(spec, apicMoDir):
     for e in epgList:
         epg = SafeDict(e)
         epgName = epg['name']
-	links = epg['contract-links']
+        links = epg['contract-links']
         if links is 'missing':
-            print "No contract links specified for epg {}".format(epgName)
+            logging.debug('No contract links specified for epg {}'.format(epgName))
             continue
 
         epgDn = 'uni/tn-' + tenant + '/ap-' + appName + '/epg-' + epgName
@@ -500,7 +343,7 @@ def addContractLinks(spec, apicMoDir):
         # If the EPG mo does not exist, nothing can be
         # done. Typically, should not happen.
         if epgMo is None:
-            print "Could not locate epg %s within tenant %s" % (epgName, tenant)
+            logging.error('Could not locate epg %s within tenant %s' % (epgName, tenant))
             return ['ERROR', "Could not locate epg {}".format(epgName)]
 
         epgcR = ConfigRequest()
@@ -509,13 +352,13 @@ def addContractLinks(spec, apicMoDir):
 
             cKind = link['contract-kind']
             if cKind != "EXTERNAL" and cKind != "INTERNAL":
-                print "Unknown contract-kind"
+                logging.error('Unknown contract-kind')
                 return ['ERROR', "Unknown contract-kind {}".format(cKind)]
 
             if cKind == "EXTERNAL":
                 contrMo = apicMoDir.lookupByDn(link['contract-dn'])
                 if contrMo is None:
-                    print "ERROR external contract {} not found".format(link['contract-dn'])
+                    logging.error('ERROR external contract {} not found'.format(link['contract-dn']))
                     return ['ERROR', "No ext contract {}".format(link['contract-dn'])]
 
             if cKind == "INTERNAL":
@@ -532,10 +375,10 @@ def addContractLinks(spec, apicMoDir):
             # at this point, we are ready to add cons/prov link
             if link['link-kind'] == "CONSUME":
                 linkMo = RsCons(epgMo, tnVzBrCPName=contrMo.name)
-                print "epg {} consumes {}".format(epgName, contrMo.name)
+                logging.debug('epg {} consumes {}'.format(epgName, contrMo.name))
             else:
                 linkMo = RsProv(epgMo, tnVzBrCPName=contrMo.name)
-                print "epg {} provides {}".format(epgName, contrMo.name)
+                logging.debug('epg {} provides {}'.format(epgName, contrMo.name))
 
         epgcR.addMo(epgMo)
         apicMoDir.commit(epgcR)
@@ -543,9 +386,10 @@ def addContractLinks(spec, apicMoDir):
     return ['success', 'ok']
 
 def getBridgeDomain(tenant, epgSpec, apicMoDir):
+    logging.debug('Inside getBridgeDomain function')
     bdName = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
     if bdName != "not_specified":
-	# Use what has been provided.
+    # Use what has been provided.
         return bdName
 
     bdName = epgSpec['nw-name']
@@ -554,7 +398,7 @@ def getBridgeDomain(tenant, epgSpec, apicMoDir):
     # Check if this BD already exists within this tenant context.
     exists, fvBDMo = checkDnExists(apicMoDir, bdDn)
     if exists:
-	print "epg {} will use existing BD {}".format(epgSpec['name'], bdName)
+        logging.info('epg {} will use existing BD {}'.format(epgSpec['name'], bdName))
         return bdName
 
     createBridgeDomain(tenant, epgSpec, apicMoDir)
@@ -563,12 +407,19 @@ def getBridgeDomain(tenant, epgSpec, apicMoDir):
 
 # create EPGs and contracts per the app spec
 def setupApp(appSpec, apicMoDir):
+    logging.debug('Inside setupApp function')
     # create an app prof if it does not exist.
     spec = SafeDict(appSpec)
     appName = spec['app-prof']
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
     epgList = spec['epgs']
+
+    # Whether its port level binding or leaf level
+    aciTopology = AciTopology()
+    aciTopology.setupAciLeafPaths()
+    logging.debug('Nodes : %s' % aciTopology.nodes)
+    logging.debug('Paths : %s' % aciTopology.paths)
 
     physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
     if physDom == "not_specified":
@@ -580,19 +431,15 @@ def setupApp(appSpec, apicMoDir):
     exists, fvApMo = checkDnExists(apicMoDir, appProfDn)
     if exists:
         # The appProfile already exists in the APIC. Stash what we got.
-        print "App-prof %s,%s already exists." % (tenant, appName)
+        logging.info('App-prof %s,%s already exists.' % (tenant, appName))
         appDict[appName] = fvApMo
     else:
-        print "Creating application profile %s in tenant %s" % (appName, tenant)
+        logging.info('Creating application profile %s in tenant %s' % (appName, tenant))
         fvApMo = Ap(tenMo, appName)
         appDict[appName] = fvApMo
 
     cR = ConfigRequest()
     cR.addMo(fvApMo)
-
-    #if nodeid is passed, use that
-    leafNodes = os.getenv('APIC_LEAF_NODE', contivDefNode)
-    leafList = leafNodes.split(",")
 
     # Walk the EPG list and create them.
     for epg in epgList:
@@ -608,19 +455,28 @@ def setupApp(appSpec, apicMoDir):
         # TODO: add static binding
         vlan = epg['vlan-tag']
         encapid = 'vlan-' + vlan
-        for leaf in leafList:
-            RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
-        
+        if aciTopology.isPath == False:
+            logging.info('Using leaf level binding')
+            logging.debug('Nodes : %s' % aciTopology.nodes)
+            for leaf in aciTopology.nodes:
+                logging.debug('Leaf : %s' % leaf)
+                RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
+        else:
+            logging.info('Using path level binding')
+            for path in aciTopology.paths:
+                logging.debug('Path = %s' % path)
+                RsPathAtt(fvEpg, tDn=path, instrImedcy='immediate', encap=encapid)
+
     apicMoDir.commit(cR)
 
     unenforcedMode = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'no')
     if unenforcedMode.lower() == "yes":
-        print "Setting up EPG in un-enforced mode."
+        logging.info('Setting up EPG in un-enforced mode.')
         setupUnenforcedMode(spec, apicMoDir)
     else:
-        print "Establishing policy contracts."
+        logging.debug('Establishing policy contracts.')
         addDefinedContracts(spec, apicMoDir)
-        print "Establishing consumer/provider links."
+        logging.debug('Establishing consumer/provider links.')
         ret = addContractLinks(spec, apicMoDir)
         if ret[0] != 'success':
             return ret
@@ -629,6 +485,7 @@ def setupApp(appSpec, apicMoDir):
 
 # delete App profile and any contracts/filter allocated for it
 def deleteApp(spec, apicMoDir):
+    logging.debug('Inside deleteApp function')
     # create an app prof if it does not exist.
     appName = spec['app-prof']
     tenant = spec['tenant']
@@ -692,6 +549,7 @@ def getEPResp(result, msg="ok", ip="None", vlan="None"):
 ################################################################################
 @app.route("/deleteAppProf", methods=['POST'])
 def delete_api():
+    logging.debug('Inside delete_api function')
     if request.headers['Content-Type'] != 'application/json':
         resp = getResp('unchanged', 'invalid-args')
         return resp
@@ -702,12 +560,12 @@ def delete_api():
     # make sure input is well-formed
     topData = SafeDict(jsData)
     if topData['tenant'] is 'missing':
-        print "tenant name is missing"
+        logging.error('tenant name is missing')
         resp = getResp('unchanged', 'tenant name missing')
         return resp
 
     if topData['app-prof'] is 'missing':
-        print "app name is missing"
+        logging.error('app name is missing')
         resp = getResp('unchanged', 'app name missing')
         return resp
 
@@ -729,17 +587,18 @@ def delete_api():
 
 ################################################################################
 def validateExternalContracts(jsData, apicMoDir):
+    logging.debug('Inside validateExternalContracts function')
     topData = SafeDict(jsData)
 
     epgList = jsData['epgs']
 
-    print "Validating pre-defined contracts"
+    logging.debug('Validating pre-defined contracts')
     for e in epgList:
         epg = SafeDict(e)
         epgName = epg['name']
         if epg['contract-links'] is 'missing':
             # No external contracts to validate.
-            print "epg {} -- no links to validate".format(epgName)
+            logging.info('epg {} -- no links to validate'.format(epgName))
             continue
 
         links = epg['contract-links']
@@ -761,6 +620,7 @@ def validateExternalContracts(jsData, apicMoDir):
 ################################################################################
 @app.route("/createAppProf", methods=['POST'])
 def create_api():
+    logging.debug('Inside create_api function')
     if request.headers['Content-Type'] != 'application/json':
         resp = getResp('unchanged', 'invalid-args')
         return resp
@@ -800,6 +660,7 @@ def create_api():
 
 ################################################################################
 def validateData(jsData):
+    logging.debug('Inside validateData function')
     topData = SafeDict(jsData)
     # validate top level
     topMandatory = set(['aci-gw-api-version', 'tenant', 'app-prof', 'epgs'])
@@ -812,7 +673,7 @@ def validateData(jsData):
     gotVer = aciGwApiVer
     if needVer != gotVer:
         err = "GW Version mismatch. Need: {} Found: {}".format(needVer, gotVer)
-        print err
+        logging.error(err)
         return ['failed', err]
         
     epgList = jsData['epgs']
@@ -836,6 +697,7 @@ def validateData(jsData):
 ################################################################################
 @app.route("/validateAppProf", methods=['POST'])
 def validate_api():
+    logging.debug('Inside validate_api function')
     if request.headers['Content-Type'] != 'application/json':
         resp = getResp('failed', 'not JSON')
         return resp
@@ -850,6 +712,7 @@ def validate_api():
 ################################################################################
 @app.route("/getEndpoint", methods=['POST'])
 def endpoint_api():
+    logging.debug('Inside endpoint_api function')
     if request.headers['Content-Type'] != 'application/json':
         resp = getEPResp('error', 'invalid-args')
         return resp
@@ -860,25 +723,25 @@ def endpoint_api():
     # make sure input is well-formed
     topData = SafeDict(jsData)
     if topData['tenant'] is 'missing':
-        print "tenant name is missing"
+        logging.error('tenant name is missing')
         resp = getEPResp('error', 'tenant name missing')
         print resp
         return resp
 
-    if topData['app'] is 'missing':
-        print "app name is missing"
+    if topData['app-prof'] is 'missing':
+        logging.error('app name is missing')
         resp = getEPResp('error', 'app name missing')
         print resp
         return resp
 
     if topData['epg'] is 'missing':
-        print "epg name is missing"
+        logging.error('epg name is missing')
         resp = getEPResp('error', 'epg name missing')
         print resp
         return resp
 
     if topData['epmac'] is 'missing':
-        print "ep mac is missing"
+        logging.error('ep mac is missing')
         resp = getEPResp('error', 'ep mac missing')
         print resp
         return resp
@@ -894,13 +757,13 @@ def endpoint_api():
            "/epg-" + topData['epg'] + "/cep-" + topData['epmac']
     epMo = apicMoDir.lookupByDn(epDN)
     if epMo is None:
-        print "ERR {} not found".format(epDN)
+        logging.error('ERR {} not found'.format(epDN))
         result = "None"
         ip = "None"
         vlan = "None"
         msg = "Not found in APIC"
     else:
-        print "{} found!".format(epDN)
+        logging.debug('{} found!'.format(epDN))
         result = "success"
         ip = epMo.ip
         encap = epMo.encap.split('-')
@@ -917,20 +780,19 @@ def endpoint_api():
 
 ################################################################################
 def readFile(fileName=None, mode="r"):
+    logging.debug('Inside readFile function')
     if fileName is None:
         return ""
 
     fileData = ""
-    try:
-      aFile = open(fileName, mode)
-      fileData = aFile.read()
-    except:
-      print "Could not read {}".format(fileName)
+    with open(fileName) as f:
+        fileData = f.read()
 
     return fileData
 
 ################################################################################
 def VerifyEnv():
+    logging.debug('Inside VerifyEnv function')
     mandatoryEnvVars = ['APIC_URL',
                         'APIC_USERNAME',
                         'APIC_LEAF_NODE',
@@ -939,16 +801,43 @@ def VerifyEnv():
     for envVar in mandatoryEnvVars:
         val = os.getenv(envVar, 'None')
         if val == 'None':
-            print "WARNING: {} is not set - GW cannot function".format(envVar)
+            logging.error('WARNING: {} is not set - GW cannot function'.format(envVar))
+
+################################################################################
+
+class AciTopology():
+    def __init__(self):
+        logging.debug('Inside AciTopology:__init__ function')
+        self.nodes = []
+        self.paths = []
+        self.isPath = False
+
+    def setupAciLeafPaths(self):
+        logging.debug('Inside AciTopology:setupAciLeafPaths function')
+        leafNodes = os.getenv('APIC_LEAF_NODE', 'not_specified')
+        logging.debug('APIC_LEAF_NODE = %s' % leafNodes)
+        if leafNodes == 'not_specified':
+            logging.error('APIC_LEAF_NODE is not specified in correct manner, exiting the code.')
+            sys.exit(2)
+        else:
+            if leafNodes.find('pathep') == -1:
+                self.isPath = False
+                self.nodes = leafNodes.split(",")
+                logging.debug('ACI leaves are %s' % self.nodes)
+            else:
+                self.isPath = True
+                self.paths = leafNodes.split(",")
+                logging.debug('ACI paths are %s' % self.paths)
 
 ################################################################################
 class ApicSession():
     def __init__(self):
+        logging.debug('Inside ApicSession:__init__ function')
         self.sessionType = "INVALID"
         self.apicUrl = os.getenv('APIC_URL', 'None')
         self.apicUser = os.getenv('APIC_USERNAME', 'None')
         if self.apicUrl == 'None' or self.apicUser == 'None':
-            print "Cannot set up session -- missing config"
+            logging.error('Cannot set up session -- missing config')
             return
 
         self.certDN = os.getenv('APIC_CERT_DN', 'None') 
@@ -957,21 +846,22 @@ class ApicSession():
         if self.certDN != 'None':
             self.pKey = readFile(aciKeyFile)
         else:
-            print "APIC_CERT_DN is not set, keys disabled"
+            logging.info('APIC_CERT_DN is not set, keys disabled')
 
         if self.pKey != "":
             self.sessionType = "KEY"
-            print "Key based auth selected"
+            logging.debug('Key based auth selected')
             return
 
         self.apicPassword = os.getenv('APIC_PASSWORD', 'None')
         if self.apicPassword == 'None':
-            print "ERROR: No valid auth type available"
+            logging.debug('ERROR: No valid auth type available')
         else:
-            print "Login based auth selected"
+            logging.debug('Login based auth selected')
             self.sessionType = "PASSWORD"
 
     def getMoDir(self):
+        logging.debug('Inside ApicSession:getMoDir function')
         if self.sessionType == "KEY":
             certSession = CertSession(self.apicUrl, self.certDN, self.pKey)
             return MoDirectory(certSession)
@@ -985,12 +875,14 @@ class ApicSession():
             return None
 
     def getSessionType(self):
+        logging.debug('Inside ApicSession:getSessionType function')
         return self.sessionType
 
 ################################################################################
 if __name__ == "__main__":
 
     # Verify basic environment settings we expect
+    logging.debug('Starting aci-gw container')
     VerifyEnv()
 
     # Setup auth type for apic sessions
