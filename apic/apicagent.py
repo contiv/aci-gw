@@ -42,7 +42,7 @@ if logLevel not in supportedLogLevels:
 logging.basicConfig(format='%(asctime)s:%(levelname)s:%(message)s', level=logLevel)
 
 ##############################################################################
-aciGwApiVer = "v1.1"
+aciGwApiVer = "v1.2"
 DefACIKeyFile = "/aciconfig/aci.key"
 contivDefTenant = 'ContivTenant'
 # Node used by contiv
@@ -385,7 +385,7 @@ def addContractLinks(spec, apicMoDir):
 
     return ['success', 'ok']
 
-def getBridgeDomain(tenant, epgSpec, apicMoDir):
+def getBridgeDomain(tenant, epgSpec, apicMoDir, commonTenant):
     logging.debug('Inside getBridgeDomain function')
     bdName = os.getenv('APIC_EPG_BRIDGE_DOMAIN', 'not_specified')
     if bdName != "not_specified":
@@ -401,27 +401,31 @@ def getBridgeDomain(tenant, epgSpec, apicMoDir):
         logging.info('epg {} will use existing BD {}'.format(epgSpec['name'], bdName))
         return bdName
 
+    # if common tenant is specified, check for BD there as well
+    if commonTenant == 'yes':
+        bdDn = formBDDn('common', bdName)
+        exists, fvBDMo = checkDnExists(apicMoDir, bdDn)
+        if exists:
+            logging.info('epg {} will use existing BD/tn-common {}'.format(epgSpec['name'], bdName))
+            return bdName
+
     createBridgeDomain(tenant, epgSpec, apicMoDir)
     return bdName
 
 
 # create EPGs and contracts per the app spec
-def setupApp(appSpec, apicMoDir):
+def setupApp(spec, apicMoDir, gwConfig):
     logging.debug('Inside setupApp function')
     # create an app prof if it does not exist.
-    spec = SafeDict(appSpec)
     appName = spec['app-prof']
     tenant = spec['tenant']
     tenMo = tenantDict[tenant]
     epgList = spec['epgs']
 
-    # Whether its port level binding or leaf level
-    aciTopology = AciTopology()
-    aciTopology.setupAciLeafPaths()
-    logging.debug('Nodes : %s' % aciTopology.nodes)
-    logging.debug('Paths : %s' % aciTopology.paths)
+    logging.debug('Nodes : %s' % gwConfig.nodes)
+    logging.debug('Paths : %s' % gwConfig.paths)
 
-    physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
+    physDom = gwConfig.physDom
     if physDom == "not_specified":
         return ['failed', 'Physical domain not specified']
 
@@ -444,7 +448,8 @@ def setupApp(appSpec, apicMoDir):
     # Walk the EPG list and create them.
     for epg in epgList:
         # Get the bridge domain for this epg, will create if needed
-        bdName = getBridgeDomain(tenant, epg, apicMoDir)
+        comTen = gwConfig.includeCommonTenant
+        bdName = getBridgeDomain(tenant, epg, apicMoDir, comTen)
         epgName = epg['name']
         fvEpg = AEPg(fvApMo, epgName)
         # associate to BD
@@ -455,22 +460,20 @@ def setupApp(appSpec, apicMoDir):
         # TODO: add static binding
         vlan = epg['vlan-tag']
         encapid = 'vlan-' + vlan
-        if aciTopology.isPath == False:
-            logging.info('Using leaf level binding')
-            logging.debug('Nodes : %s' % aciTopology.nodes)
-            for leaf in aciTopology.nodes:
-                logging.debug('Leaf : %s' % leaf)
-                RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
-        else:
-            logging.info('Using path level binding')
-            for path in aciTopology.paths:
-                logging.debug('Path = %s' % path)
-                RsPathAtt(fvEpg, tDn=path, instrImedcy='immediate', encap=encapid)
+        logging.info('Nodes : %s' % gwConfig.nodes)
+        for leaf in gwConfig.nodes:
+            logging.debug('Bind Leaf : %s' % leaf)
+            RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
+
+        logging.info('Paths : %s' % gwConfig.paths)
+        for path in gwConfig.paths:
+            logging.debug('Path = %s' % path)
+            RsPathAtt(fvEpg, tDn=path, instrImedcy='immediate', encap=encapid)
 
     apicMoDir.commit(cR)
 
-    unenforcedMode = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'no')
-    if unenforcedMode.lower() == "yes":
+    enforce = gwConfig.enforcePolicies
+    if enforce.lower() == "no":
         logging.info('Setting up EPG in un-enforced mode.')
         setupUnenforcedMode(spec, apicMoDir)
     else:
@@ -588,7 +591,6 @@ def delete_api():
 ################################################################################
 def validateExternalContracts(jsData, apicMoDir):
     logging.debug('Inside validateExternalContracts function')
-    topData = SafeDict(jsData)
 
     epgList = jsData['epgs']
 
@@ -626,12 +628,19 @@ def create_api():
         return resp
  
     print request
-    jsData = request.get_json()
-    print jsData
+    reqData = request.get_json()
+    print reqData
+    jsData = SafeDict(reqData)
     # make sure input is well-formed
     valid = validateData(jsData)
     if not valid[0] is 'success':
         resp = getResp('invalid-args', valid[1])
+        return resp
+
+    gwConfig = AciGwConfig(jsData)
+    valid = gwConfig.Validate()
+    if not valid[0] is 'success':
+        resp = getResp('error-gw-config', valid[1])
         return resp
 
     apicUrl = os.environ.get('APIC_URL') 
@@ -653,18 +662,17 @@ def create_api():
 
     setupTenant(jsData, apicMoDir)
 
-    ret = setupApp(jsData, apicMoDir)
+    ret = setupApp(jsData, apicMoDir, gwConfig)
     apicMoDir.logout()
     resp = getResp(ret[0], ret[1])
     return resp
 
 ################################################################################
-def validateData(jsData):
+def validateData(topData):
     logging.debug('Inside validateData function')
-    topData = SafeDict(jsData)
     # validate top level
     topMandatory = set(['aci-gw-api-version', 'tenant', 'app-prof', 'epgs'])
-    topOpt = set(['contract-defs'])
+    topOpt = set(['contract-defs', 'gw-config'])
     res = topData.Validate(topMandatory, topOpt, "Top level")
     if res[0] != 'ok':
         return res
@@ -676,7 +684,7 @@ def validateData(jsData):
         logging.error(err)
         return ['failed', err]
         
-    epgList = jsData['epgs']
+    epgList = topData['epgs']
     if len(epgList) == 0:
         return ['failed', 'empty/missing epglist']
 
@@ -794,9 +802,7 @@ def readFile(fileName=None, mode="r"):
 def VerifyEnv():
     logging.debug('Inside VerifyEnv function')
     mandatoryEnvVars = ['APIC_URL',
-                        'APIC_USERNAME',
-                        'APIC_LEAF_NODE',
-                        'APIC_PHYS_DOMAIN']
+                        'APIC_USERNAME']
 
     for envVar in mandatoryEnvVars:
         val = os.getenv(envVar, 'None')
@@ -805,21 +811,43 @@ def VerifyEnv():
 
 ################################################################################
 
-class AciTopology():
-    def __init__(self):
-        logging.debug('Inside AciTopology:__init__ function')
+class AciGwConfig():
+    def __init__(self, spec):
+        logging.debug('Inside AciGwConfig:__init__ function')
         self.nodes = []
         self.paths = []
-        self.isPath = False
+        self.physDom = 'not_specified'
+        self.enforcePolicies = 'yes'
+        self.includeCommonTenant = 'no'
+        gc = spec['gw-config']
+        if gc is 'missing':
+            self.setupFromEnv()
+        else:
+            safeGc = SafeDict(gc)
+            nodes = safeGc['nodeBindings']
+            if not nodes is 'missing':
+                self.nodes = nodes.split(",")
+            paths = safeGc['pathBindings']
+            if not paths is 'missing':
+                self.paths = paths.split(",")
+            physDom = safeGc['physicalDomain']
+            if not physDom is 'missing':
+                self.physDom = physDom
+            enforcePolicies = safeGc['enforcePolicies']
+            if not enforcePolicies is 'missing':
+                self.enforcePolicies = enforcePolicies
+            includeCommonTenant = safeGc['includeCommonTenant']
+            if not includeCommonTenant is 'missing':
+                self.includeCommonTenant = includeCommonTenant
 
-    def setupAciLeafPaths(self):
-        logging.debug('Inside AciTopology:setupAciLeafPaths function')
+    def setupFromEnv(self):
+        logging.debug('Inside AciTopology:setupFromEnv function')
+        self.physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
+        self.enforcePolicies = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'yes')
+        self.includeCommonTenant = os.getenv('APIC_INC_COMMON_TENANT', 'no')
         leafNodes = os.getenv('APIC_LEAF_NODE', 'not_specified')
         logging.debug('APIC_LEAF_NODE = %s' % leafNodes)
-        if leafNodes == 'not_specified':
-            logging.error('APIC_LEAF_NODE is not specified in correct manner, exiting the code.')
-            sys.exit(2)
-        else:
+        if leafNodes != 'not_specified':
             if leafNodes.find('pathep') == -1:
                 self.isPath = False
                 self.nodes = leafNodes.split(",")
@@ -828,6 +856,14 @@ class AciTopology():
                 self.isPath = True
                 self.paths = leafNodes.split(",")
                 logging.debug('ACI paths are %s' % self.paths)
+
+    def Validate(self):
+        if len(self.nodes) == 0 and len(self.paths) == 0:
+            return ['failed', 'No bindings specified']
+        if self.physDom == 'not_specified':
+            return ['failed', 'No physDom specified']
+
+        return ['success', 'LGTM']
 
 ################################################################################
 class ApicSession():
