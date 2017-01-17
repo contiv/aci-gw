@@ -174,6 +174,11 @@ def createBridgeDomain(tenant, epgSpec, apicMoDir):
     netmask = gw.split('/')
     if len(netmask) != 2:
         return ['failed', 'invalid subnet']
+    # Check if gw ip is correct
+    bdIsL3 = True
+    if netmask[0] == '':
+        logging.info('Missing gateway in contiv network. Creating BD without Subnet (L2 only).')
+        bdIsL3 = False
     
     bdName = epgSpec['nw-name']
     bdDn = formBDDn(tenant, bdName)
@@ -200,12 +205,14 @@ def createBridgeDomain(tenant, epgSpec, apicMoDir):
 
     fvBDMo = BD(tenMo, name=bdName)
     RsCtx(fvBDMo, tnFvCtxName=tenVrfName)
-    # create subnet
-    Subnet(fvBDMo, gw)
+    if bdIsL3:
+        # create subnet
+        Subnet(fvBDMo, gw)
     cR = ConfigRequest()
     cR.addMo(fvBDMo)
     apicMoDir.commit(cR)
-    subnetDict[gw] = fvBDMo
+    if bdIsL3:
+        subnetDict[gw] = fvBDMo
     logging.info('Created BD {}'.format(bdName))
 
     return ['success', 'ok']
