@@ -850,7 +850,12 @@ class AciGwConfig():
     def setupFromEnv(self):
         logging.debug('Inside AciTopology:setupFromEnv function')
         self.physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
-        self.enforcePolicies = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'yes')
+        self.enforcePolicies = 'yes'
+        # if unrestricted mode is yes, do not enforce policies
+        unrMode = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'no')
+        if unrMode == 'yes':
+            self.enforcePolicies = 'no'
+
         self.includeCommonTenant = os.getenv('APIC_INC_COMMON_TENANT', 'no')
         leafNodes = os.getenv('APIC_LEAF_NODE', 'not_specified')
         logging.debug('APIC_LEAF_NODE = %s' % leafNodes)
