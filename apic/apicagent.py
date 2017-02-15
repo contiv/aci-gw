@@ -28,6 +28,7 @@ from cobra.model.fv import AEPg
 from cobra.model.fv import RsBd
 from cobra.model.fv import RsDomAtt, RsNodeAtt, RsPathAtt
 from cobra.model.fv import RsProv, RsCons, CEp
+from cobra.model.vmm import SecP
 from cobra.model.vz import Filter, Entry, BrCP, Subj, RsSubjFiltAtt
 from flask import Flask
 from flask import json, request, Response
@@ -433,8 +434,9 @@ def setupApp(spec, apicMoDir, gwConfig):
     logging.debug('Paths : %s' % gwConfig.paths)
 
     physDom = gwConfig.physDom
-    if physDom == "not_specified":
-        return ['failed', 'Physical domain not specified']
+    vmmDom = gwConfig.vmmDom
+    if physDom == "not_specified" and vmmDom == "not_specified":
+        return ['failed', 'Physical and VMM domain not specified']
 
     # Check if the APIC already knows about this application profile
     # within this tenant context
@@ -461,21 +463,31 @@ def setupApp(spec, apicMoDir, gwConfig):
         fvEpg = AEPg(fvApMo, epgName)
         # associate to BD
         RsBd(fvEpg, tnFvBDName=bdName)
-        # associate to phy domain
-        contivClusterDom = 'uni/phys-' + physDom
-        RsDomAtt(fvEpg, contivClusterDom)
-        # TODO: add static binding
         vlan = epg['vlan-tag']
         encapid = 'vlan-' + vlan
-        logging.info('Nodes : %s' % gwConfig.nodes)
-        for leaf in gwConfig.nodes:
-            logging.debug('Bind Leaf : %s' % leaf)
-            RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
+        
+        if vmmDom != "not_specified":
+            # associate to vmm domain
+            logging.info("VMM Domain: {}".format(vmmDom))
+            contivClusterDom = 'uni/vmmp-VMware/dom-' + vmmDom
+            logging.debug("Bind VMM : {} on {}".format(vmmDom, encapid))
+            rsDomAtt = RsDomAtt(fvEpg, tDn=contivClusterDom, instrImedcy='immediate', encap=encapid, resImedcy='immediate')
+            SecP(rsDomAtt, forgedTransmits='accept', allowPromiscuous='accept', macChanges='accept')
+        
+        if physDom != "not_specified":
+            # associate to phy domain
+            contivClusterDom = 'uni/phys-' + physDom
+            RsDomAtt(fvEpg, contivClusterDom)
+            # TODO: add static binding
+            logging.info('Nodes : %s' % gwConfig.nodes)
+            for leaf in gwConfig.nodes:
+                logging.debug('Bind Leaf : %s' % leaf)
+                RsNodeAtt(fvEpg, tDn=leaf, encap=encapid)
 
-        logging.info('Paths : %s' % gwConfig.paths)
-        for path in gwConfig.paths:
-            logging.debug('Path = %s' % path)
-            RsPathAtt(fvEpg, tDn=path, instrImedcy='immediate', encap=encapid)
+            logging.info('Paths : %s' % gwConfig.paths)
+            for path in gwConfig.paths:
+                logging.debug('Path = %s' % path)
+                RsPathAtt(fvEpg, tDn=path, instrImedcy='immediate', encap=encapid)
 
     apicMoDir.commit(cR)
 
@@ -824,6 +836,7 @@ class AciGwConfig():
         self.nodes = []
         self.paths = []
         self.physDom = 'not_specified'
+        self.vmmDom = 'not_specified'
         self.enforcePolicies = 'yes'
         self.includeCommonTenant = 'no'
         gc = spec['gw-config']
@@ -840,6 +853,9 @@ class AciGwConfig():
             physDom = safeGc['physicalDomain']
             if not physDom is 'missing':
                 self.physDom = physDom
+            vmmDom = safeGc['vmmDomain']
+            if not vmmDom is 'missing':
+                self.vmmDom = vmmDom
             enforcePolicies = safeGc['enforcePolicies']
             if not enforcePolicies is 'missing':
                 self.enforcePolicies = enforcePolicies
@@ -850,6 +866,7 @@ class AciGwConfig():
     def setupFromEnv(self):
         logging.debug('Inside AciTopology:setupFromEnv function')
         self.physDom = os.getenv('APIC_PHYS_DOMAIN', 'not_specified')
+        self.vmmDom = os.getenv('APIC_VMM_DOMAIN', 'not_specified')
         self.enforcePolicies = 'yes'
         # if unrestricted mode is yes, do not enforce policies
         unrMode = os.getenv('APIC_CONTRACTS_UNRESTRICTED_MODE', 'no')
@@ -870,10 +887,11 @@ class AciGwConfig():
                 logging.debug('ACI paths are %s' % self.paths)
 
     def Validate(self):
-        if len(self.nodes) == 0 and len(self.paths) == 0:
-            return ['failed', 'No bindings specified']
-        if self.physDom == 'not_specified':
-            return ['failed', 'No physDom specified']
+        if self.physDom == 'not_specified' and self.vmmDom == 'not_specified':
+            return ['failed', 'No physDom or vmmDom specified']
+        elif self.physDom != 'not_specified':
+            if len(self.nodes) == 0 and len(self.paths) == 0:
+                return ['failed', 'No bindings specified']
 
         return ['success', 'LGTM']
 
