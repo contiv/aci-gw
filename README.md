@@ -6,19 +6,23 @@ Receives REST requests from netmaster and performs the corresponding apic config
 
 The SDK needs to be downloaded from an APIC. It is not yet available from a Cisco download site.
 The following information should be provided as arguments to the docker build.
-a) APIC URL.
-b) SDK version.
+a) APIC URL
+b) SDK version
+c) https_proxy if the environment requires a proxy
 
 The SDK version corresponding to the APIC software can be found looking at the files at https://<apic_url>/cobra/_downloads/
 
 The command to build the aci-gw container is:
 ```
-docker build --build-arg APIC_URL=<apic_url> --build-arg APIC_PKG_VERSION=<apic_sdk_version> -t contiv/aci-gw -f Dockerfile .
+docker build --build-arg APIC_URL=<apic_url> --build-arg APIC_PKG_VERSION=<apic_sdk_version> \
+ --force-rm -t contiv/aci-gw .
 ```
 
 Example:
 ```
-docker build --build-arg APIC_URL=172.31.152.18 --build-arg APIC_PKG_VERSION=1.1_1.67-py2.7 -t contiv/aci-gw:09-27-2016.2.0_2g -f Dockerfile .
+docker build --build-arg APIC_URL=172.31.152.18 --build-arg APIC_PKG_VERSION=1.1_1.67-py2.7 \
+ --build-arg https_proxy="https://proxy.esl.cisco.com:8080" --force-rm \
+ -t contiv/aci-gw:09-27-2016.2.0_2g .
 ```
 
 ### Pre-requisites for ACI setup
