@@ -2,7 +2,7 @@
 
 Receives REST requests from netmaster and performs the corresponding apic configuration. Uses the aci cobra package for interactions with apic.
 
-##Building the aci-gw container##
+### Building the aci-gw container
 
 The SDK needs to be downloaded from an APIC. It is not yet available from a Cisco download site.
 The following information should be provided as arguments to the docker build.
@@ -47,7 +47,7 @@ docker build --build-arg APIC_URL=172.31.152.18 --build-arg APIC_PKG_VERSION=1.1
     7. Make a note of the full node name of the ToRs you have connected to your servers.
 ```
 
-##Starting the aci-gw container##
+### Starting the aci-gw container
 
 The aci-gw container needs to be accessible by netmaster at localhost:5000. In order to ensure that, the aci-gw can be started on the same node as the netmaster, with --net=host option.
 
@@ -67,12 +67,12 @@ e.g. topology/pod-1/node-101,topology/pod-1/node-102
 APIC_PHYS_DOMAIN
 This is the name of the physical domain used for the contiv cluster (Step 2 above).
 
-##Authentication##
+## Authentication
 Both key based authentication and password authentication are supported. Key based authentication is the recommended method.
 
 For password based authentication, you need to pass the password to the aci-gw using the APIC_PASSWORD environment variable.
 
-###key based authentication###
+### key based authentication
 
  Step 1. Create a key and certicate add the certificate to APIC using the procedure described in http://www.cisco.com/c/en/us/td/docs/switches/datacenter/aci/apic/sw/kb/b_KB_Signature_Based_Transactions.pdf.
  
