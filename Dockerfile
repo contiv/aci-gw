@@ -3,7 +3,7 @@ MAINTAINER contiv
 
 ARG https_proxy
 
-RUN apk --no-cache add wget python ca-certificates py-pip \
+RUN apk --no-cache add wget python ca-certificates py-pip openssl \
  && pip install --upgrade pip \
  && pip install Flask \
  && mkdir ./cobra \
